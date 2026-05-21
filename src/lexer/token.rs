@@ -35,7 +35,7 @@ pub enum TokenKind {
     Fn, Let, Mut, Const, Comptime,
     If, Else, While, For, In, Loop,
     Return, Break, Continue,
-    Struct, Enum, Impl,
+    Struct, Enum, Impl, Trait,
     Match,
     Unsafe, Pin, Asm,
     Pub, Owned, Undefined, As,

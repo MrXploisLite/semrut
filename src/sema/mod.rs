@@ -210,6 +210,13 @@ pub struct EnumInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraitInfo {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub methods: Vec<FnInfo>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConstInfo {
     pub name: String,
     pub ty: Ty,
@@ -221,6 +228,7 @@ struct Env {
     functions: HashMap<String, FnInfo>,
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
+    traits: HashMap<String, TraitInfo>,
     consts: HashMap<String, ConstInfo>,
     type_aliases: HashMap<String, Ty>,
     type_params: Vec<String>, // active type parameters in current scope
@@ -233,6 +241,7 @@ impl Env {
             functions: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
+            traits: HashMap::new(),
             consts: HashMap::new(),
             type_aliases: HashMap::new(),
             type_params: Vec::new(),
@@ -353,6 +362,18 @@ impl Env {
 
     fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
         self.enums.get(name).cloned()
+    }
+
+    fn add_trait(&mut self, info: TraitInfo) -> Result<()> {
+        if self.traits.contains_key(&info.name) {
+            return Err(SemaError::DuplicateDef { name: info.name });
+        }
+        self.traits.insert(info.name.clone(), info);
+        Ok(())
+    }
+
+    fn lookup_trait(&self, name: &str) -> Option<TraitInfo> {
+        self.traits.get(name).cloned()
     }
 
     fn add_const(&mut self, info: ConstInfo) -> Result<()> {
@@ -477,6 +498,7 @@ pub struct CheckedProgram {
 }
 
 pub struct CheckedImpl {
+    pub trait_name: Option<String>,
     pub target_type: Ty,
     pub methods: Vec<CheckedFn>,
 }
@@ -576,6 +598,11 @@ pub enum CheckedExpr {
     PathAccess {
         type_name: String,
         name: String,
+        result_ty: Ty,
+    },
+    StructLit {
+        name: String,
+        fields: Vec<(String, CheckedExpr)>,
         result_ty: Ty,
     },
     Index {
@@ -699,6 +726,32 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     value,
                 })?;
             }
+            Item::Trait(t_item) => {
+                env.type_params = t_item.type_params.clone();
+                let methods: Vec<FnInfo> = t_item.methods.iter()
+                    .map(|m| {
+                        let params: Vec<(String, Ty)> = m.params.iter()
+                            .map(|p| env.resolve_type(&p.ty).map(|ty| (p.name.clone(), ty)))
+                            .collect::<Result<Vec<_>>>()?;
+                        let ret_type = match &m.ret_type {
+                            Some(t) => env.resolve_type(t)?,
+                            None => Ty::Void,
+                        };
+                        Ok(FnInfo {
+                            name: m.name.clone(),
+                            type_params: Vec::new(),
+                            params,
+                            ret_type,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                env.type_params.clear();
+                env.add_trait(TraitInfo {
+                    name: t_item.name.clone(),
+                    type_params: t_item.type_params.clone(),
+                    methods,
+                })?;
+            }
             Item::Impl(impl_item) => {
                 // Validate target type exists
                 let target_ty = env.resolve_type(&impl_item.target_type)?;
@@ -713,8 +766,13 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                         Some(t) => env.resolve_type(t)?,
                         None => Ty::Void,
                     };
-                    // Register with mangled name: TypeName::method
-                    let mangled = format!("{}::{}", target_ty, method.name);
+                    // For trait impls: mangle as TraitName::method
+                    // For inherent impls: mangle as TypeName::method
+                    let mangled = if let Some(ref trait_name) = impl_item.trait_name {
+                        format!("{}::{}", trait_name, method.name)
+                    } else {
+                        format!("{}::{}", target_ty, method.name)
+                    };
                     env.add_fn(FnInfo {
                         name: mangled,
                         type_params: impl_item.type_params.clone(),
@@ -781,7 +839,13 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                 let target_ty = env.resolve_type(&impl_item.target_type)?;
                 let mut checked_methods = Vec::new();
                 for method in &impl_item.methods {
-                    let mangled = format!("{}::{}", target_ty, method.name);
+                    // For trait impls: mangle as TraitName::method
+                    // For inherent impls: mangle as TypeName::method
+                    let mangled = if let Some(ref trait_name) = impl_item.trait_name {
+                        format!("{}::{}", trait_name, method.name)
+                    } else {
+                        format!("{}::{}", target_ty, method.name)
+                    };
                     let fn_info = env.lookup_fn(&mangled).ok_or_else(|| {
                         SemaError::UndefinedFn {
                             name: mangled.clone(),
@@ -804,9 +868,13 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     });
                 }
                 impls.push(CheckedImpl {
+                    trait_name: impl_item.trait_name.clone(),
                     target_type: target_ty,
                     methods: checked_methods,
                 });
+            }
+            Item::Trait(_t_item) => {
+                // Traits are already registered in Pass 1
             }
         }
     }
@@ -1262,6 +1330,27 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
             })
         }
 
+        Expr::StructLit { name, fields } => {
+            let struct_info = env.lookup_struct(name).ok_or_else(|| {
+                SemaError::UndefinedFn {
+                    name: name.clone(),
+                    pos: "0".to_string(),
+                }
+            })?;
+            let mut checked_fields = Vec::new();
+            for (field_name, field_expr) in fields {
+                let checked = check_expr(env, field_expr)?;
+                // TODO: validate field type matches struct definition
+                checked_fields.push((field_name.clone(), checked));
+            }
+            let result_ty = Ty::Struct(name.clone());
+            Ok(CheckedExpr::StructLit {
+                name: name.clone(),
+                fields: checked_fields,
+                result_ty,
+            })
+        }
+
         Expr::Match { scrutinee, arms } => {
             let checked_scrutinee = check_expr(env, scrutinee)?;
             let scrutinee_ty = get_expr_type(&checked_scrutinee)?;
@@ -1593,6 +1682,7 @@ fn get_expr_type(expr: &CheckedExpr) -> Result<Ty> {
         CheckedExpr::FieldAccess { result_ty, .. } => Ok(result_ty.clone()),
         CheckedExpr::PathAccess { result_ty, .. } => Ok(result_ty.clone()),
         CheckedExpr::Index { result_ty, .. } => Ok(result_ty.clone()),
+        CheckedExpr::StructLit { result_ty, .. } => Ok(result_ty.clone()),
         CheckedExpr::AsmBlock { .. } => Ok(Ty::Void),
         CheckedExpr::Cast { target_ty, .. } => Ok(target_ty.clone()),
         CheckedExpr::Match { result_ty, .. } => Ok(result_ty.clone()),

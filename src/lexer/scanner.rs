@@ -338,6 +338,7 @@ pub fn scan(source: &str, filename: &str) -> Result<Vec<Token>> {
                     "struct" => TokenKind::Struct,
                     "enum" => TokenKind::Enum,
                     "impl" => TokenKind::Impl,
+                    "trait" => TokenKind::Trait,
                     "match" => TokenKind::Match,
                     "unsafe" => TokenKind::Unsafe,
                     "pin" => TokenKind::Pin,

@@ -16,10 +16,19 @@ pub enum Item {
     Enum(EnumItem),
     Const(ConstItem),
     Impl(ImplItem),
+    Trait(TraitItem),
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitItem {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub methods: Vec<FnItem>, // method signatures (body optional)
 }
 
 #[derive(Debug, Clone)]
 pub struct ImplItem {
+    pub trait_name: Option<String>, // Some("TraitName") for `impl Trait for Type`
     pub target_type: Type,
     pub type_params: Vec<String>,  // <T> for impl<T>
     pub methods: Vec<FnItem>,
@@ -211,6 +220,10 @@ pub enum Expr {
     PathAccess {
         type_name: String,
         name: String,
+    },
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
     },
     Index {
         target: Box<Expr>,

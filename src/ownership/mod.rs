@@ -421,6 +421,12 @@ impl OwnershipChecker {
                 }
             }
 
+            CheckedExpr::StructLit { fields, .. } => {
+                for (_, field_expr) in fields {
+                    self.check_expr(field_expr)?;
+                }
+            }
+
             // Literals don't need ownership tracking
             CheckedExpr::IntLit(_, _) |
             CheckedExpr::FloatLit(_, _) |

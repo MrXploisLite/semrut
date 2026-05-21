@@ -319,11 +319,15 @@ pub fn build(program: &CheckedProgram) -> MirProgram {
 
     // Build impl methods
     for impl_item in &program.impls {
-        let type_name = format!("{}", impl_item.target_type);
+        let mangle_prefix = if let Some(ref trait_name) = impl_item.trait_name {
+            trait_name.clone()
+        } else {
+            format!("{}", impl_item.target_type)
+        };
         for method in &impl_item.methods {
             let mut mir_func = build_function(method);
-            // Mangle name: TypeName_method
-            mir_func.name = format!("{}_{}", type_name, method.name);
+            // Mangle name: TraitName_method or TypeName_method
+            mir_func.name = format!("{}_{}", mangle_prefix, method.name);
             functions.push(mir_func);
         }
     }
@@ -1053,6 +1057,16 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
                 arms: mir_arms,
             });
 
+            (MirValue::Var(dest), sema_ty_to_mir(result_ty))
+        }
+        crate::sema::CheckedExpr::StructLit { name, fields, result_ty } => {
+            let dest = format!("_t{}", temp_counter);
+            *temp_counter += 1;
+            // For now, just evaluate all field expressions
+            // TODO: proper struct allocation and field stores
+            for (_field_name, field_expr) in fields {
+                build_expr(field_expr, stmts, temp_counter);
+            }
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
     }

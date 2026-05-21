@@ -81,8 +81,9 @@ impl<'a> Parser<'a> {
             crate::lexer::TokenKind::Enum => self.parse_enum_item(is_pub),
             crate::lexer::TokenKind::Const => self.parse_const_item(is_pub),
             crate::lexer::TokenKind::Impl => self.parse_impl_item(),
+            crate::lexer::TokenKind::Trait => self.parse_trait_item(),
             _ => Err(ParserError::UnexpectedToken {
-                expected: "fn, struct, enum, const, or impl".to_string(),
+                expected: "fn, struct, enum, const, impl, or trait".to_string(),
                 got: token_desc(&self.peek().kind),
                 pos: self.peek().span.start.to_string(),
             }),
@@ -716,6 +717,42 @@ impl<'a> Parser<'a> {
                         };
                     }
                 }
+                crate::lexer::TokenKind::LBrace => {
+                    // Struct literal: TypeName { field: value, ... }
+                    let name = match &expr {
+                        Expr::Var(name) => name.clone(),
+                        _ => {
+                            return Err(ParserError::UnexpectedToken {
+                                expected: "type name before {".to_string(),
+                                got: "expression".to_string(),
+                                pos: "0".to_string(),
+                            });
+                        }
+                    };
+                    self.advance();
+                    let mut fields = Vec::new();
+                    while !matches_kind(&self.peek().kind, "RBrace") {
+                        let field_name = match &self.peek().kind {
+                            crate::lexer::TokenKind::Ident(s) => s.clone(),
+                            _ => {
+                                return Err(ParserError::UnexpectedToken {
+                                    expected: "field name".to_string(),
+                                    got: token_desc(&self.peek().kind),
+                                    pos: self.peek().span.start.to_string(),
+                                });
+                            }
+                        };
+                        self.advance();
+                        self.expect("Colon")?;
+                        let value = self.parse_expr()?;
+                        fields.push((field_name, value));
+                        if matches_kind(&self.peek().kind, "Comma") {
+                            self.advance();
+                        }
+                    }
+                    self.expect("RBrace")?;
+                    expr = Expr::StructLit { name, fields };
+                }
                 crate::lexer::TokenKind::LBracket => {
                     self.advance();
                     let index = self.parse_expr()?;
@@ -1021,11 +1058,32 @@ impl<'a> Parser<'a> {
     fn parse_impl_item(&mut self) -> Result<Item> {
         self.expect("Impl")?;
 
-        // Parse impl type parameters: impl<T> Type<T>
+        // Parse impl type parameters: impl<T>
         let type_params = self.parse_type_params()?;
 
-        // Parse target type (e.g., `MyStruct` or `Vec<T>`)
-        let target_type = self.parse_type()?;
+        // Parse first type — could be trait name or target type
+        let first_type = self.parse_type()?;
+
+        // Check for `for` keyword: impl<T> Trait for Type
+        let (trait_name, target_type) = if matches_kind(&self.peek().kind, "For") {
+            self.advance(); // consume 'for'
+            let target = self.parse_type()?;
+            // first_type should be a Named type (the trait)
+            let trait_n = match &first_type {
+                Type::Named(s) => s.clone(),
+                Type::Generic { name, .. } => name.clone(),
+                _ => {
+                    return Err(ParserError::UnexpectedToken {
+                        expected: "trait name".to_string(),
+                        got: "complex type".to_string(),
+                        pos: "0".to_string(),
+                    });
+                }
+            };
+            (Some(trait_n), target)
+        } else {
+            (None, first_type)
+        };
 
         self.expect("LBrace")?;
 
@@ -1094,7 +1152,101 @@ impl<'a> Parser<'a> {
 
         self.expect("RBrace")?;
 
-        Ok(Item::Impl(ImplItem { target_type, type_params, methods }))
+        Ok(Item::Impl(ImplItem { trait_name, target_type, type_params, methods }))
+    }
+
+    fn parse_trait_item(&mut self) -> Result<Item> {
+        self.expect("Trait")?;
+        let name_tok = self.advance();
+        let name = match &name_tok.kind {
+            crate::lexer::TokenKind::Ident(s) => s.clone(),
+            _ => {
+                return Err(ParserError::UnexpectedToken {
+                    expected: "trait name".to_string(),
+                    got: token_desc(&name_tok.kind),
+                    pos: name_tok.span.start.to_string(),
+                });
+            }
+        };
+
+        let type_params = self.parse_type_params()?;
+
+        self.expect("LBrace")?;
+
+        let mut methods = Vec::new();
+        while !matches_kind(&self.peek().kind, "RBrace") {
+            self.expect("Fn")?;
+            let name_tok = self.advance();
+            let name = match &name_tok.kind {
+                crate::lexer::TokenKind::Ident(s) => s.clone(),
+                _ => {
+                    return Err(ParserError::UnexpectedToken {
+                        expected: "method name".to_string(),
+                        got: token_desc(&name_tok.kind),
+                        pos: name_tok.span.start.to_string(),
+                    });
+                }
+            };
+
+            self.expect("LParen")?;
+            let mut params = Vec::new();
+            if !matches_kind(&self.peek().kind, "RParen") {
+                loop {
+                    let name_tok = self.advance();
+                    let param_name = match &name_tok.kind {
+                        crate::lexer::TokenKind::Ident(s) => s.clone(),
+                        _ => {
+                            return Err(ParserError::UnexpectedToken {
+                                expected: "parameter name".to_string(),
+                                got: token_desc(&name_tok.kind),
+                                pos: name_tok.span.start.to_string(),
+                            });
+                        }
+                    };
+                    self.expect("Colon")?;
+                    let ty = self.parse_type()?;
+                    params.push(Param { name: param_name, ty });
+
+                    if matches_kind(&self.peek().kind, "Comma") {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect("RParen")?;
+
+            let ret_type = if matches_kind(&self.peek().kind, "Arrow") {
+                self.advance();
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
+            // Trait methods can have optional body
+            let body = if matches_kind(&self.peek().kind, "LBrace") {
+                self.parse_block()?
+            } else {
+                // Just a semicolon — method signature only
+                if matches_kind(&self.peek().kind, "Semi") {
+                    self.advance();
+                }
+                Block { stmts: Vec::new() }
+            };
+
+            methods.push(FnItem {
+                name,
+                type_params: Vec::new(),
+                params,
+                ret_type,
+                body,
+                is_pub: false,
+            });
+        }
+
+        self.expect("RBrace")?;
+
+        Ok(Item::Trait(TraitItem { name, type_params, methods }))
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern> {
