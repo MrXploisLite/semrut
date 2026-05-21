@@ -1,0 +1,7 @@
+// Test: valid code (should pass)
+pub fn main() -> i32 {
+    let mut x = 42;
+    let r1 = &mut x;
+    *r1 = 10;
+    return x;
+}

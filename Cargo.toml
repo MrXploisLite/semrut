@@ -1,0 +1,23 @@
+[package]
+name = "semrut"
+version = "0.1.0"
+edition = "2024"
+description = "Assembly + Rust = SemRut. A systems programming language with hardware-level control and memory safety."
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+colored = "2.1"
+
+# Error handling
+thiserror = "2.0"
+
+# LLVM bindings for codegen — inkwell 0.8 with LLVM 18, force-dynamic to avoid Polly issue
+inkwell = { version = "0.8", features = ["llvm18-1-force-dynamic", "target-all"] }
+
+[dev-dependencies]
+insta = "1.41"
+
+[[bin]]
+name = "smrc"
+path = "src/main.rs"

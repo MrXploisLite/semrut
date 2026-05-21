@@ -1,0 +1,35 @@
+// SemRut test program
+// This is the first SemRut program ever written
+
+const MAX: i32 = 100;
+
+fn fib(n: i32) -> i32 {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn read_tsc() -> u64 {
+    let result: u64 = undefined;
+    unsafe {
+        asm {
+            "rdtsc",
+            "shl rdx, 32",
+            "or rax, rdx",
+            out("rax") result
+        }
+    }
+    result
+}
+
+pub fn main() -> i32 {
+    let x = fib(10);
+    let mut counter = 0;
+
+    while (counter < MAX) {
+        counter = counter + 1;
+    }
+
+    return x;
+}

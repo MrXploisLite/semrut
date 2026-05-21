@@ -1,0 +1,5 @@
+// Test stdlib: print only
+pub fn main() -> i32 {
+    print("Hello from SemRut!\n");
+    return 0;
+}

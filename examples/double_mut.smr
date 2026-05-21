@@ -1,0 +1,9 @@
+// Test: double mutable borrow (should fail)
+pub fn main() -> i32 {
+    let mut x = 42;
+    let r1 = &mut x;
+    let r2 = &mut x;  // ERROR: double mutable borrow!
+    *r1 = 10;
+    *r2 = 20;
+    return x;
+}

@@ -1,0 +1,30 @@
+// Test type errors
+
+fn bad_types() -> i32 {
+    let x: bool = 42;
+    return "hello";
+}
+
+fn use_undefined_var() -> i32 {
+    return nonexistent + 1;
+}
+
+fn bad_condition() {
+    let x = 5;
+    if (x) {
+        return;
+    }
+}
+
+fn assign_immutable() {
+    let x = 10;
+    x = 20;
+}
+
+fn wrong_arg_count() {
+    let result = add(1);
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}

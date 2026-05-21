@@ -1,0 +1,7 @@
+// Test stdlib: alloc only
+pub fn main() -> i32 {
+    let size: u64 = 64;
+    let ptr = alloc(size);
+    free(ptr);
+    return 0;
+}

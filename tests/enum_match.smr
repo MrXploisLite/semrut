@@ -1,0 +1,17 @@
+fn test_multi(x: i64) -> i64 {
+    let result: i64 = match x {
+        0 => 10,
+        1 => 20,
+        2 => 30,
+        _ => 0,
+    };
+    return result;
+}
+
+fn main() -> i64 {
+    let a: i64 = test_multi(0);
+    let b: i64 = test_multi(1);
+    let c: i64 = test_multi(2);
+    let d: i64 = test_multi(99);
+    return a + b + c + d;
+}

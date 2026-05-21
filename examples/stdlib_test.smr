@@ -1,0 +1,13 @@
+// Test stdlib: print, alloc, free
+pub fn main() -> i32 {
+    print("Hello from SemRut!\n");
+    let size: u64 = 64;
+    let ptr = alloc(size);
+    let n: u64 = 64;
+    let c: i32 = 0;
+    memset(ptr, c, n);
+    free(ptr);
+    let val: i64 = 42;
+    print_int(val);
+    return 0;
+}

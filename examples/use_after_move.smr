@@ -1,0 +1,15 @@
+// Test: use after move (should fail)
+struct Box {
+    value: i32,
+}
+
+fn take_ownership(b: Box) -> i32 {
+    return b.value;
+}
+
+pub fn main() -> i32 {
+    let my_box = Box { value: 42 };
+    let x = take_ownership(my_box);  // my_box is moved here
+    let y = take_ownership(my_box);  // ERROR: use after move!
+    return x + y;
+}
