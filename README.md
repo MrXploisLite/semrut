@@ -197,4 +197,6 @@ Options:
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+GPL v3 — see [LICENSE](LICENSE) for details. SemRut is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+All derivative works must also be licensed under GPL v3. This ensures every improvement stays open and available to the community.
