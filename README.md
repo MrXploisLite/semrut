@@ -8,7 +8,7 @@ SemRut (smrc) is a systems programming language that combines the low-level cont
 
 - **Hardware control** — inline assembly, SIMD types, explicit memory modes
 - **Memory safety** — ownership/borrow checking by default, `unsafe` opt-out
-- **Zero-cost abstractions** — comptime evaluation, generics, traits
+- **Zero-cost abstractions** — generics, traits, comptime evaluation
 - **LLVM backend** — battle-tested optimization, multi-arch support
 
 ## Quick Start
@@ -90,36 +90,77 @@ struct Point {
 }
 
 impl Point {
-    fn new(x: i64, y: i64) -> i64 {
+    fn new(x: i64, y: i64) -> Point {
+        return Point { x: x, y: y };
+    }
+
+    fn distance(self: Point) -> i64 {
+        let x: i64 = self.x;
+        let y: i64 = self.y;
         return x + y;
     }
 }
 
 fn main() -> i64 {
-    let result: i64 = Point::new(3, 4);
-    return result;  // 7
+    let p: Point = Point { x: 3, y: 4 };
+    let d: i64 = p.distance();
+    return d;  // 7
 }
 ```
 
-### Pattern Matching
-
-```rust
-fn unwrap(opt: i64) -> i64 {
-    let result: i64 = match opt {
-        0 => 0,
-        1 => 100,
-        _ => opt,
-    };
-    return result;
-}
-```
-
-### Enums
+### Enums & Pattern Matching
 
 ```rust
 enum Option {
     Some(i64),
     None,
+}
+
+fn unwrap(opt: Option) -> i64 {
+    let result: i64 = match opt {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    return result;
+}
+```
+
+### Generics
+
+```rust
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn main() -> i64 {
+    let n: i64 = identity(42);
+    return n;
+}
+```
+
+### Traits
+
+```rust
+trait Printable {
+    fn print(self: Point);
+}
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl Printable for Point {
+    fn print(self: Point) {
+        let x: i64 = self.x;
+        print_int(x);
+    }
+}
+
+fn main() -> i64 {
+    let p: Point = Point { x: 10, y: 20 };
+    Printable::print(p);
+    return 0;
 }
 ```
 
@@ -161,10 +202,10 @@ semrut/
 ├── src/
 │   ├── lexer/       # Handwritten tokenizer
 │   ├── parser/      # Recursive descent parser + AST
-│   ├── sema/        # Type checker + name resolution
+│   ├── sema/        # Type checker + name resolution + traits
 │   ├── ownership/   # Borrow checker
 │   ├── mir/         # Mid-level IR
-│   ├── llvm/        # LLVM codegen
+│   ├── llvm/        # LLVM codegen (inkwell 0.8, LLVM 18)
 │   └── main.rs      # CLI entry point
 ├── tests/           # Test programs
 └── examples/        # Example programs
@@ -185,15 +226,37 @@ Options:
   -O <0-3>              Optimization level (default: 0)
 ```
 
+## Implemented Features
+
+- [x] Lexer (handwritten scanner with keyword recognition)
+- [x] Parser (recursive descent, full expression parsing)
+- [x] Type checker (name resolution, type inference, coercion rules)
+- [x] Ownership checker (borrow tracking, scope analysis, move semantics)
+- [x] MIR builder (basic blocks, SSA-like, explicit control flow)
+- [x] LLVM codegen (inkwell 0.8, LLVM 18, opaque pointers)
+- [x] Standard library (print, print_int, alloc, free, memcpy, memset)
+- [x] Control flow (if/else, while, loop, return, implicit return)
+- [x] Structs with methods (`impl` blocks, static calls `Type::method()`)
+- [x] Struct literals (`Type { field: value, ... }`)
+- [x] Struct field access (LLVM GEP via `build_struct_gep`)
+- [x] Enums with pattern matching (`match` expressions, enum destructuring)
+- [x] Generics (type parameters `<T, U>`, type inference from call args)
+- [x] Traits (interfaces, `impl Trait for Type`, method mangling)
+- [x] Inline assembly (`asm { out/in/constraints }`)
+- [x] Undefined values (`let x: T = undefined`)
+- [x] References and dereferencing (`&mut`, `*`)
+
 ## Roadmap
 
-- [ ] Generics (type parameters)
-- [ ] Traits (interfaces)
-- [ ] Pattern matching with enum destructuring
-- [ ] SIMD vector types (`vec128<f32>`, `vec256<i64>`)
+- [ ] Trait bounds on generics (`<T: Printable>`)
+- [ ] Trait method resolution (dispatch to correct impl)
 - [ ] Comptime evaluation
-- [ ] Standard library expansion
+- [ ] SIMD vector types (`vec128<f32>`, `vec256<i64>`)
+- [ ] Standard library expansion (String, Vec, HashMap)
 - [ ] Cross-compilation targets
+- [ ] Safe/pin/raw memory mode enforcement
+- [ ] Module system and imports
+- [ ] Error handling (`Result`, `?` operator)
 
 ## License
 
