@@ -43,6 +43,8 @@ struct CodegenState<'ctx> {
     functions: HashMap<String, FunctionValue<'ctx>>,
     /// Map from MIR block ID to LLVM BasicBlock
     llvm_blocks: HashMap<usize, BasicBlock<'ctx>>,
+    /// Cached LLVM struct types by name
+    struct_types: HashMap<String, inkwell::types::StructType<'ctx>>,
 }
 
 impl<'ctx> CodegenState<'ctx> {
@@ -54,7 +56,17 @@ impl<'ctx> CodegenState<'ctx> {
             allocas: HashMap::new(),
             functions: HashMap::new(),
             llvm_blocks: HashMap::new(),
+            struct_types: HashMap::new(),
         }
+    }
+
+    fn get_or_create_struct_type(&mut self, name: &str, field_types: Vec<inkwell::types::BasicTypeEnum<'ctx>>) -> inkwell::types::StructType<'ctx> {
+        if let Some(ty) = self.struct_types.get(name) {
+            return *ty;
+        }
+        let struct_ty = self.context.struct_type(&field_types, false);
+        self.struct_types.insert(name.to_string(), struct_ty);
+        struct_ty
     }
 
     fn load_var(&self, name: &str) -> Result<BasicValueEnum<'ctx>> {
@@ -116,10 +128,32 @@ fn mir_type_to_llvm<'ctx>(context: &'ctx Context, ty: &MirType) -> inkwell::type
             elem.array_type(*len as u32).into()
         }
         MirType::Slice(_) => context.ptr_type(AddressSpace::default()).into(),
-        MirType::Struct(_) => context.i64_type().into(),
+        MirType::Struct(name) => {
+            // This will be resolved via state.struct_types in mir_type_to_llvm_with_state
+            // Fallback to i64 if called without state
+            let _ = name;
+            context.i64_type().into()
+        }
         MirType::Enum(_) => context.i64_type().into(),
         MirType::Generic(_, _) => context.i64_type().into(),
         MirType::GenericParam(_) => context.i64_type().into(), // placeholder — resolved during monomorphization
+    }
+}
+
+fn mir_type_to_llvm_with_state<'ctx>(state: &CodegenState<'ctx>, ty: &MirType) -> inkwell::types::BasicTypeEnum<'ctx> {
+    match ty {
+        MirType::Struct(name) => {
+            if let Some(struct_ty) = state.struct_types.get(name) {
+                (*struct_ty).into()
+            } else {
+                state.context.i64_type().into()
+            }
+        }
+        MirType::Array(inner, len) => {
+            let elem = mir_type_to_llvm_with_state(state, inner);
+            elem.array_type(*len as u32).into()
+        }
+        _ => mir_type_to_llvm(state.context, ty),
     }
 }
 
@@ -144,19 +178,27 @@ pub fn codegen(mir: &MirProgram, _opt_level: u8) -> Result<LlvmModule> {
 
     let mut state = CodegenState::new(&context, module, builder);
 
+    // Pre-create LLVM struct types
+    for mir_struct in &mir.structs {
+        let field_types: Vec<inkwell::types::BasicTypeEnum> = mir_struct.fields.iter()
+            .map(|(_, ty)| mir_type_to_llvm_with_state(&state, ty))
+            .collect();
+        state.get_or_create_struct_type(&mir_struct.name, field_types);
+    }
+
     // Declare external C library functions
     declare_external_functions(&mut state);
 
     // Pre-declare all user functions (so forward references work)
     for func in &mir.functions {
         let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = func.params.iter()
-            .map(|(_, ty)| mir_type_to_llvm(&context, ty).into())
+            .map(|(_, ty)| mir_type_to_llvm_with_state(&state, ty).into())
             .collect();
 
         let fn_type = if func.ret_type == MirType::Void {
             context.void_type().fn_type(&param_types, false)
         } else {
-            let ret_type = mir_type_to_llvm(&context, &func.ret_type);
+            let ret_type = mir_type_to_llvm_with_state(&state, &func.ret_type);
             basic_type_to_fn_type(&context, ret_type, &param_types)
         };
 
@@ -207,10 +249,10 @@ fn compile_function<'ctx>(state: &mut CodegenState<'ctx>, func: &MirFunction) ->
     sorted_blocks.sort_by_key(|b| b.id);
 
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = func.params.iter()
-        .map(|(_, ty)| mir_type_to_llvm(context, ty).into())
+        .map(|(_, ty)| mir_type_to_llvm_with_state(state, ty).into())
         .collect();
 
-    let ret_type = mir_type_to_llvm(context, &func.ret_type);
+    let ret_type = mir_type_to_llvm_with_state(state, &func.ret_type);
 
     let fn_type = if func.ret_type == MirType::Void {
         context.void_type().fn_type(&param_types, false)
@@ -238,7 +280,7 @@ fn compile_function<'ctx>(state: &mut CodegenState<'ctx>, func: &MirFunction) ->
     state.allocas.clear();
     for (i, (name, ty)) in func.params.iter().enumerate() {
         let param = llvm_func.get_nth_param(i as u32).unwrap();
-        let llvm_ty = mir_type_to_llvm(context, ty);
+        let llvm_ty = mir_type_to_llvm_with_state(state, ty);
         let alloca = state.builder.build_alloca(llvm_ty, name)
             .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
         state.builder.build_store(alloca, param)
@@ -296,7 +338,7 @@ fn compile_block<'ctx>(
                 None => {
                     // For non-void functions, return zero
                     if func.ret_type != MirType::Void {
-                        let zero = mir_type_to_llvm(state.context, &func.ret_type);
+                        let zero = mir_type_to_llvm_with_state(state, &func.ret_type);
                         let zero_val: BasicValueEnum<'ctx> = match zero {
                             inkwell::types::BasicTypeEnum::IntType(t) => t.const_zero().into(),
                             inkwell::types::BasicTypeEnum::FloatType(t) => t.const_zero().into(),
@@ -497,7 +539,7 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
 
         MirStmt::Cast { dest, value, target_ty } => {
             let val = resolve_value(state, value)?;
-            let target_llvm = mir_type_to_llvm(state.context, target_ty);
+            let target_llvm = mir_type_to_llvm_with_state(state, target_ty);
 
             let casted = match val {
                 BasicValueEnum::IntValue(v) => {
@@ -626,6 +668,37 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
             let result = state.builder.build_load(result_ty, result_alloca, &dest)
                 .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
             state.create_var(dest, result)?;
+        }
+
+        MirStmt::FieldAccess { dest, struct_var, struct_name, field_index, field_ty } => {
+            // Get the struct pointer (alloca)
+            let (struct_ptr, _) = state.allocas.get(struct_var)
+                .ok_or_else(|| CodegenError::LlvmError {
+                    msg: format!("undefined variable '{}'", struct_var),
+                })?;
+
+            // Look up the struct type from the cache
+            let struct_ty = state.struct_types.get(struct_name)
+                .ok_or_else(|| CodegenError::LlvmError {
+                    msg: format!("unknown struct type '{}'", struct_name),
+                })?;
+
+            // Use build_struct_gep with opaque pointers (needs pointee type explicitly)
+            let field_ptr = unsafe {
+                state.builder.build_struct_gep(
+                    *struct_ty,
+                    *struct_ptr,
+                    *field_index,
+                    &format!("{}_gep", dest),
+                ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
+            };
+
+            // Load the field value
+            let llvm_field_ty = mir_type_to_llvm_with_state(state, field_ty);
+            let field_val = state.builder.build_load(llvm_field_ty, field_ptr, &format!("{}_field", dest))
+                .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
+
+            state.create_var(dest, field_val)?;
         }
     }
 
@@ -757,7 +830,7 @@ fn resolve_value<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>> {
     match value {
         MirValue::Int(n, ty) => {
-            let llvm_ty = mir_type_to_llvm(state.context, ty);
+            let llvm_ty = mir_type_to_llvm_with_state(state, ty);
             match llvm_ty {
                 inkwell::types::BasicTypeEnum::IntType(t) => {
                     let is_signed = matches!(ty, MirType::I8 | MirType::I16 | MirType::I32 | MirType::I64 | MirType::I128);
@@ -767,7 +840,7 @@ fn resolve_value<'ctx>(
             }
         }
         MirValue::Float(n, ty) => {
-            let llvm_ty = mir_type_to_llvm(state.context, ty);
+            let llvm_ty = mir_type_to_llvm_with_state(state, ty);
             match llvm_ty {
                 inkwell::types::BasicTypeEnum::FloatType(t) => {
                     Ok(t.const_float(*n).into())
