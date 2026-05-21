@@ -103,6 +103,9 @@ impl<'a> Parser<'a> {
             }
         };
 
+        // Parse optional type parameters: <T, U>
+        let type_params = self.parse_type_params()?;
+
         self.expect("LParen")?;
         let mut params = Vec::new();
         if !matches_kind(&self.peek().kind, "RParen") {
@@ -128,11 +131,45 @@ impl<'a> Parser<'a> {
 
         Ok(Item::Fn(FnItem {
             name,
+            type_params,
             params,
             ret_type,
             body,
             is_pub,
         }))
+    }
+
+    fn parse_type_params(&mut self) -> Result<Vec<String>> {
+        if !matches_kind(&self.peek().kind, "Lt") {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume '<'
+
+        let mut params = Vec::new();
+        if !matches_kind(&self.peek().kind, "Gt") {
+            loop {
+                let tok = self.advance();
+                let name = match &tok.kind {
+                    crate::lexer::TokenKind::Ident(s) => s.clone(),
+                    _ => {
+                        return Err(ParserError::UnexpectedToken {
+                            expected: "type parameter name".to_string(),
+                            got: token_desc(&tok.kind),
+                            pos: tok.span.start.to_string(),
+                        });
+                    }
+                };
+                params.push(name);
+
+                if matches_kind(&self.peek().kind, "Comma") {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect("Gt")?;
+        Ok(params)
     }
 
     fn parse_param(&mut self) -> Result<Param> {
@@ -159,12 +196,23 @@ impl<'a> Parser<'a> {
             crate::lexer::TokenKind::Ident(s) => {
                 let name = s.clone();
                 self.advance();
-                // Check for generic: vec128<f32> or [T; N]
+                // Check for generic: vec128<f32> or Pair<T, U>
                 if matches_kind(&self.peek().kind, "Lt") {
                     self.advance();
-                    let inner = self.parse_type()?;
+                    let mut args = Vec::new();
+                    if !matches_kind(&self.peek().kind, "Gt") {
+                        loop {
+                            let inner = self.parse_type()?;
+                            args.push(inner);
+                            if matches_kind(&self.peek().kind, "Comma") {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                     self.expect("Gt")?;
-                    Ok(Type::Generic { name, args: vec![inner] })
+                    Ok(Type::Generic { name, args })
                 } else {
                     Ok(Type::Named(name))
                 }
@@ -855,6 +903,8 @@ impl<'a> Parser<'a> {
             }
         };
 
+        let type_params = self.parse_type_params()?;
+
         self.expect("LBrace")?;
         let mut fields = Vec::new();
         while !matches_kind(&self.peek().kind, "RBrace") {
@@ -881,7 +931,7 @@ impl<'a> Parser<'a> {
         }
         self.expect("RBrace")?;
 
-        Ok(Item::Struct(StructItem { name, fields }))
+        Ok(Item::Struct(StructItem { name, type_params, fields }))
     }
 
     fn parse_enum_item(&mut self, _is_pub: bool) -> Result<Item> {
@@ -897,6 +947,8 @@ impl<'a> Parser<'a> {
                 });
             }
         };
+
+        let type_params = self.parse_type_params()?;
 
         self.expect("LBrace")?;
         let mut variants = Vec::new();
@@ -939,7 +991,7 @@ impl<'a> Parser<'a> {
         }
         self.expect("RBrace")?;
 
-        Ok(Item::Enum(EnumItem { name, variants }))
+        Ok(Item::Enum(EnumItem { name, type_params, variants }))
     }
 
     fn parse_const_item(&mut self, _is_pub: bool) -> Result<Item> {
@@ -968,6 +1020,9 @@ impl<'a> Parser<'a> {
 
     fn parse_impl_item(&mut self) -> Result<Item> {
         self.expect("Impl")?;
+
+        // Parse impl type parameters: impl<T> Type<T>
+        let type_params = self.parse_type_params()?;
 
         // Parse target type (e.g., `MyStruct` or `Vec<T>`)
         let target_type = self.parse_type()?;
@@ -1029,6 +1084,7 @@ impl<'a> Parser<'a> {
 
             methods.push(FnItem {
                 name,
+                type_params: Vec::new(), // methods inherit impl's type params
                 params,
                 ret_type,
                 body,
@@ -1038,7 +1094,7 @@ impl<'a> Parser<'a> {
 
         self.expect("RBrace")?;
 
-        Ok(Item::Impl(ImplItem { target_type, methods }))
+        Ok(Item::Impl(ImplItem { target_type, type_params, methods }))
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern> {

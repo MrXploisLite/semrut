@@ -119,6 +119,7 @@ fn mir_type_to_llvm<'ctx>(context: &'ctx Context, ty: &MirType) -> inkwell::type
         MirType::Struct(_) => context.i64_type().into(),
         MirType::Enum(_) => context.i64_type().into(),
         MirType::Generic(_, _) => context.i64_type().into(),
+        MirType::GenericParam(_) => context.i64_type().into(), // placeholder — resolved during monomorphization
     }
 }
 

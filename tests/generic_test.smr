@@ -1,0 +1,8 @@
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn main() -> i64 {
+    let val: i64 = identity(42);
+    return val;
+}

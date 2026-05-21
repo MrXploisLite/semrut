@@ -21,12 +21,14 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct ImplItem {
     pub target_type: Type,
+    pub type_params: Vec<String>,  // <T> for impl<T>
     pub methods: Vec<FnItem>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FnItem {
     pub name: String,
+    pub type_params: Vec<String>,  // <T, U>
     pub params: Vec<Param>,
     pub ret_type: Option<Type>,
     pub body: Block,
@@ -42,6 +44,7 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct StructItem {
     pub name: String,
+    pub type_params: Vec<String>,  // <T, U>
     pub fields: Vec<StructField>,
 }
 
@@ -54,6 +57,7 @@ pub struct StructField {
 #[derive(Debug, Clone)]
 pub struct EnumItem {
     pub name: String,
+    pub type_params: Vec<String>,  // <T>
     pub variants: Vec<EnumVariant>,
 }
 

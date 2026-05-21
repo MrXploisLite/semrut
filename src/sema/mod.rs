@@ -75,6 +75,7 @@ pub enum Ty {
     Enum(String),
     Fn(Vec<Ty>, Box<Ty>),
     Generic(String, Vec<Ty>), // vec128<f32>
+    GenericParam(String),     // T, U (type parameters)
     Never,  // undefined, return from diverging
 }
 
@@ -123,6 +124,7 @@ impl fmt::Display for Ty {
                 }
                 write!(f, ">")
             }
+            Ty::GenericParam(name) => write!(f, "{}", name),
             Ty::Never => write!(f, "never"),
         }
     }
@@ -182,6 +184,7 @@ pub struct VarInfo {
 #[derive(Debug, Clone)]
 pub struct FnInfo {
     pub name: String,
+    pub type_params: Vec<String>,
     pub params: Vec<(String, Ty)>,
     pub ret_type: Ty,
 }
@@ -189,6 +192,7 @@ pub struct FnInfo {
 #[derive(Debug, Clone)]
 pub struct StructInfo {
     pub name: String,
+    pub type_params: Vec<String>,
     pub fields: Vec<(String, Ty)>,
 }
 
@@ -201,6 +205,7 @@ pub struct EnumVariantInfo {
 #[derive(Debug, Clone)]
 pub struct EnumInfo {
     pub name: String,
+    pub type_params: Vec<String>,
     pub variants: Vec<EnumVariantInfo>,
 }
 
@@ -218,6 +223,7 @@ struct Env {
     enums: HashMap<String, EnumInfo>,
     consts: HashMap<String, ConstInfo>,
     type_aliases: HashMap<String, Ty>,
+    type_params: Vec<String>, // active type parameters in current scope
 }
 
 impl Env {
@@ -229,6 +235,7 @@ impl Env {
             enums: HashMap::new(),
             consts: HashMap::new(),
             type_aliases: HashMap::new(),
+            type_params: Vec::new(),
         };
 
         // Register builtin types
@@ -240,26 +247,31 @@ impl Env {
         // Register builtin stdlib functions
         env.functions.insert("print".to_string(), FnInfo {
             name: "print".to_string(),
+            type_params: Vec::new(),
             params: vec![("fmt".to_string(), Ty::Str)],
             ret_type: Ty::Void,
         });
         env.functions.insert("print_int".to_string(), FnInfo {
             name: "print_int".to_string(),
+            type_params: Vec::new(),
             params: vec![("n".to_string(), Ty::I64)],
             ret_type: Ty::Void,
         });
         env.functions.insert("alloc".to_string(), FnInfo {
             name: "alloc".to_string(),
+            type_params: Vec::new(),
             params: vec![("size".to_string(), Ty::U64)],
             ret_type: Ty::Ptr(Box::new(Ty::U8)),
         });
         env.functions.insert("free".to_string(), FnInfo {
             name: "free".to_string(),
+            type_params: Vec::new(),
             params: vec![("ptr".to_string(), Ty::Ptr(Box::new(Ty::U8)))],
             ret_type: Ty::Void,
         });
         env.functions.insert("memcpy".to_string(), FnInfo {
             name: "memcpy".to_string(),
+            type_params: Vec::new(),
             params: vec![
                 ("dst".to_string(), Ty::Ptr(Box::new(Ty::U8))),
                 ("src".to_string(), Ty::Ptr(Box::new(Ty::U8))),
@@ -269,6 +281,7 @@ impl Env {
         });
         env.functions.insert("memset".to_string(), FnInfo {
             name: "memset".to_string(),
+            type_params: Vec::new(),
             params: vec![
                 ("dst".to_string(), Ty::Ptr(Box::new(Ty::U8))),
                 ("c".to_string(), Ty::I32),
@@ -357,6 +370,10 @@ impl Env {
     fn resolve_type(&self, ty: &Type) -> Result<Ty> {
         match ty {
             Type::Named(s) => {
+                // Check if it's a type parameter
+                if self.type_params.contains(s) {
+                    return Ok(Ty::GenericParam(s.clone()));
+                }
                 if let Some(builtin) = parse_builtin_type(s) {
                     return Ok(builtin);
                 }
@@ -395,6 +412,34 @@ impl Env {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Ty::Generic(name.clone(), resolved_args))
             }
+        }
+    }
+
+    // Resolve type with substitution map for monomorphization
+    fn resolve_type_with_subst(&self, ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+        match ty {
+            Ty::GenericParam(name) => {
+                subst.get(name).cloned().unwrap_or(ty.clone())
+            }
+            Ty::Ptr(inner) => Ty::Ptr(Box::new(self.resolve_type_with_subst(inner, subst))),
+            Ty::Ref { mutable, inner } => Ty::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.resolve_type_with_subst(inner, subst)),
+            },
+            Ty::Array(inner, len) => Ty::Array(
+                Box::new(self.resolve_type_with_subst(inner, subst)),
+                *len,
+            ),
+            Ty::Slice(inner) => Ty::Slice(Box::new(self.resolve_type_with_subst(inner, subst))),
+            Ty::Fn(params, ret) => Ty::Fn(
+                params.iter().map(|p| self.resolve_type_with_subst(p, subst)).collect(),
+                Box::new(self.resolve_type_with_subst(ret, subst)),
+            ),
+            Ty::Generic(name, args) => Ty::Generic(
+                name.clone(),
+                args.iter().map(|a| self.resolve_type_with_subst(a, subst)).collect(),
+            ),
+            _ => ty.clone(),
         }
     }
 }
@@ -438,6 +483,7 @@ pub struct CheckedImpl {
 
 pub struct CheckedFn {
     pub name: String,
+    pub type_params: Vec<String>,
     pub params: Vec<(String, Ty)>,
     pub ret_type: Ty,
     pub body: CheckedBlock,
@@ -595,6 +641,8 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
     for item in &program.items {
         match item {
             Item::Fn(fn_item) => {
+                // Set type params for resolution
+                env.type_params = fn_item.type_params.clone();
                 let params: Vec<(String, Ty)> = fn_item.params.iter()
                     .map(|p| env.resolve_type(&p.ty).map(|ty| (p.name.clone(), ty)))
                     .collect::<Result<Vec<_>>>()?;
@@ -602,22 +650,28 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     Some(t) => env.resolve_type(t)?,
                     None => Ty::Void,
                 };
+                env.type_params.clear();
                 env.add_fn(FnInfo {
                     name: fn_item.name.clone(),
+                    type_params: fn_item.type_params.clone(),
                     params: params.clone(),
                     ret_type: ret_type.clone(),
                 })?;
             }
             Item::Struct(s_item) => {
+                env.type_params = s_item.type_params.clone();
                 let fields: Vec<(String, Ty)> = s_item.fields.iter()
                     .map(|f| env.resolve_type(&f.ty).map(|ty| (f.name.clone(), ty)))
                     .collect::<Result<Vec<_>>>()?;
+                env.type_params.clear();
                 env.add_struct(StructInfo {
                     name: s_item.name.clone(),
+                    type_params: s_item.type_params.clone(),
                     fields: fields.clone(),
                 })?;
             }
             Item::Enum(e_item) => {
+                env.type_params = e_item.type_params.clone();
                 let variants: Vec<EnumVariantInfo> = e_item.variants.iter()
                     .map(|v| {
                         let fields: Vec<Ty> = v.fields.iter()
@@ -626,8 +680,10 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                         Ok(EnumVariantInfo { name: v.name.clone(), fields })
                     })
                     .collect::<Result<Vec<_>>>()?;
+                env.type_params.clear();
                 env.add_enum(EnumInfo {
                     name: e_item.name.clone(),
+                    type_params: e_item.type_params.clone(),
                     variants,
                 })?;
             }
@@ -646,6 +702,8 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
             Item::Impl(impl_item) => {
                 // Validate target type exists
                 let target_ty = env.resolve_type(&impl_item.target_type)?;
+                // Set type params from impl block
+                env.type_params = impl_item.type_params.clone();
                 // Register methods
                 for method in &impl_item.methods {
                     let params: Vec<(String, Ty)> = method.params.iter()
@@ -659,10 +717,12 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     let mangled = format!("{}::{}", target_ty, method.name);
                     env.add_fn(FnInfo {
                         name: mangled,
+                        type_params: impl_item.type_params.clone(),
                         params,
                         ret_type,
                     })?;
                 }
+                env.type_params.clear();
             }
         }
     }
@@ -678,14 +738,17 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
         match item {
             Item::Fn(fn_item) => {
                 let fn_info = env.lookup_fn(&fn_item.name).unwrap();
+                env.type_params = fn_info.type_params.clone();
                 env.push_scope();
                 for (name, ty) in &fn_info.params {
                     env.add_var(name.clone(), ty.clone(), true)?; // params are mutable by default in asm context
                 }
                 let body = check_block(&mut env, &fn_item.body, &fn_info.ret_type)?;
                 env.pop_scope();
+                env.type_params.clear();
                 functions.push(CheckedFn {
                     name: fn_item.name.clone(),
+                    type_params: fn_info.type_params.clone(),
                     params: fn_info.params,
                     ret_type: fn_info.ret_type,
                     body,
@@ -733,6 +796,7 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     env.pop_scope();
                     checked_methods.push(CheckedFn {
                         name: method.name.clone(),
+                        type_params: fn_info.type_params.clone(),
                         params: fn_info.params,
                         ret_type: fn_info.ret_type,
                         body,
@@ -1012,7 +1076,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
 
         Expr::Call { callee, args } => {
             // Check if callee is a variable — if so, look up as function first
-            let fn_info = match callee.as_ref() {
+            let mut fn_info = match callee.as_ref() {
                 Expr::Var(name) => {
                     // Try function lookup first
                     if let Some(info) = env.lookup_fn(name) {
@@ -1022,6 +1086,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                         match &var.ty {
                             Ty::Fn(params, ret) => FnInfo {
                                 name: name.clone(),
+                                type_params: Vec::new(),
                                 params: params.iter().enumerate()
                                     .map(|(i, ty)| (format!("arg{}", i), ty.clone()))
                                     .collect(),
@@ -1044,6 +1109,43 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                     return Err(SemaError::NotCallable { ty: callee_ty.to_string() });
                 }
             };
+
+            // If function has type parameters, infer them from arguments
+            let mut subst: HashMap<String, Ty> = HashMap::new();
+            if !fn_info.type_params.is_empty() {
+                // First, check all arguments to get their types
+                let mut arg_tys: Vec<(CheckedExpr, Ty)> = Vec::new();
+                for arg in args {
+                    let checked_arg = check_expr(env, arg)?;
+                    let arg_ty = get_expr_type(&checked_arg)?;
+                    arg_tys.push((checked_arg, arg_ty));
+                }
+
+                // Infer type parameters from arguments
+                for (i, (checked_arg, arg_ty)) in arg_tys.iter().enumerate() {
+                    if i < fn_info.params.len() {
+                        let param_ty = &fn_info.params[i].1;
+                        infer_types(param_ty, arg_ty, &mut subst)?;
+                    }
+                }
+
+                // Check that all type parameters were inferred
+                for tp in &fn_info.type_params {
+                    if !subst.contains_key(tp) {
+                        return Err(SemaError::Other {
+                            msg: format!("cannot infer type parameter `{}`", tp),
+                        });
+                    }
+                }
+
+                // Apply substitution to params and ret_type
+                let concrete_params: Vec<(String, Ty)> = fn_info.params.iter()
+                    .map(|(n, ty)| (n.clone(), env.resolve_type_with_subst(ty, &subst)))
+                    .collect();
+                let concrete_ret = env.resolve_type_with_subst(&fn_info.ret_type, &subst);
+                fn_info.params = concrete_params;
+                fn_info.ret_type = concrete_ret;
+            }
 
             if args.len() != fn_info.params.len() {
                 return Err(SemaError::WrongArgCount {
@@ -1345,6 +1447,64 @@ fn check_unary_op(op: &UnaryOp, operand: &Ty) -> Result<Ty> {
                 op: "!".to_string(),
                 operand: operand.to_string(),
             })
+        }
+    }
+}
+
+// Infer type parameters by matching a generic type against a concrete type
+fn infer_types(generic: &Ty, concrete: &Ty, subst: &mut HashMap<String, Ty>) -> Result<()> {
+    match (generic, concrete) {
+        (Ty::GenericParam(name), _) => {
+            if let Some(existing) = subst.get(name) {
+                if existing != concrete {
+                    return Err(SemaError::Other {
+                        msg: format!("type parameter `{}` inferred as both `{}` and `{}`", name, existing, concrete),
+                    });
+                }
+            } else {
+                subst.insert(name.clone(), concrete.clone());
+            }
+            Ok(())
+        }
+        (Ty::Ptr(g_inner), Ty::Ptr(c_inner)) => infer_types(g_inner, c_inner, subst),
+        (Ty::Ref { mutable: gm, inner: g_inner }, Ty::Ref { mutable: cm, inner: c_inner }) => {
+            if gm != cm {
+                return Err(SemaError::Other {
+                    msg: "ref mutability mismatch".to_string(),
+                });
+            }
+            infer_types(g_inner, c_inner, subst)
+        }
+        (Ty::Array(g_inner, gl), Ty::Array(c_inner, cl)) => {
+            if gl != cl {
+                return Err(SemaError::Other {
+                    msg: "array length mismatch".to_string(),
+                });
+            }
+            infer_types(g_inner, c_inner, subst)
+        }
+        (Ty::Slice(g_inner), Ty::Slice(c_inner)) => infer_types(g_inner, c_inner, subst),
+        (Ty::Generic(g_name, g_args), Ty::Generic(c_name, c_args)) => {
+            if g_name != c_name || g_args.len() != c_args.len() {
+                return Err(SemaError::Other {
+                    msg: format!("generic type mismatch: {} vs {}", generic, concrete),
+                });
+            }
+            for (g, c) in g_args.iter().zip(c_args.iter()) {
+                infer_types(g, c, subst)?;
+            }
+            Ok(())
+        }
+        _ => {
+            // Concrete types must match exactly
+            if generic != concrete {
+                Err(SemaError::TypeMismatch {
+                    expected: generic.to_string(),
+                    got: concrete.to_string(),
+                })
+            } else {
+                Ok(())
+            }
         }
     }
 }

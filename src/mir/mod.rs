@@ -132,6 +132,7 @@ pub enum MirType {
     Struct(String),
     Enum(String),
     Generic(String, Vec<MirType>),
+    GenericParam(String),
 }
 
 impl fmt::Display for MirType {
@@ -171,6 +172,7 @@ impl fmt::Display for MirType {
                 }
                 write!(f, ">")
             }
+            MirType::GenericParam(name) => write!(f, "{}", name),
         }
     }
 }
@@ -301,6 +303,7 @@ fn sema_ty_to_mir(ty: &Ty) -> MirType {
             name.clone(),
             args.iter().map(sema_ty_to_mir).collect(),
         ),
+        Ty::GenericParam(name) => MirType::GenericParam(name.clone()),
     }
 }
 
