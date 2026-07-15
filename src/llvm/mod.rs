@@ -5,7 +5,7 @@ use inkwell::types::BasicType;
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
 use inkwell::AddressSpace;
-use crate::mir::{MirProgram, MirFunction, MirStmt, MirTerminator, MirValue, MirType, MirBinOp, MirUnaryOp, MirPattern, MirMatchArm};
+use crate::mir::{MirProgram, MirFunction, MirStmt, MirTerminator, MirValue, MirType, MirBinOp, MirUnaryOp, MirPattern};
 use thiserror::Error;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -254,7 +254,7 @@ fn compile_function<'ctx>(state: &mut CodegenState<'ctx>, func: &MirFunction) ->
 
     let ret_type = mir_type_to_llvm_with_state(state, &func.ret_type);
 
-    let fn_type = if func.ret_type == MirType::Void {
+    let _fn_type = if func.ret_type == MirType::Void {
         context.void_type().fn_type(&param_types, false)
     } else {
         basic_type_to_fn_type(context, ret_type, &param_types)
@@ -490,7 +490,7 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
             // Build constraints string from outputs and inputs
             let mut constraints = Vec::new();
             let mut output_types: Vec<inkwell::types::BasicTypeEnum<'ctx>> = Vec::new();
-            for (reg, _ty) in outputs {
+            for (_reg, _ty) in outputs {
                 // Output constraint: "=r" for register output
                 constraints.push("=r".to_string());
                 // For now, assume i64 output
@@ -621,7 +621,7 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
                     MirPattern::Wildcard => {
                         default_block = Some(arm_blocks[i]);
                     }
-                    MirPattern::EnumVariant { variant, .. } => {
+                    MirPattern::EnumVariant { variant: _, .. } => {
                         // For enum variants, we'd need discriminant info
                         // For now, treat as sequential (0, 1, 2, ...)
                         let idx = i as u64;

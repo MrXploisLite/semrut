@@ -1246,7 +1246,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                 }
 
                 // Infer type parameters from arguments
-                for (i, (checked_arg, arg_ty)) in arg_tys.iter().enumerate() {
+                for (i, (_checked_arg, arg_ty)) in arg_tys.iter().enumerate() {
                     if i < fn_info.params.len() {
                         let param_ty = &fn_info.params[i].1;
                         infer_types(param_ty, arg_ty, &mut subst)?;
@@ -1495,7 +1495,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
             // Second pass: coerce literal ints to result type
             let final_ty = result_ty.unwrap_or(Ty::Void);
             let mut checked_arms = Vec::new();
-            for (pattern, guard, body, body_ty) in prechecked {
+            for (pattern, guard, body, _body_ty) in prechecked {
                 let coerced_body = if let (CheckedExpr::IntLit(n, _), Ty::I64) = (&body, &final_ty) {
                     CheckedExpr::IntLit(*n, Ty::I64)
                 } else if let (CheckedExpr::IntLit(n, _), Ty::I32) = (&body, &final_ty) {

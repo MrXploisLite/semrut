@@ -237,19 +237,19 @@ impl OwnershipChecker {
 
     fn check_expr(&mut self, expr: &CheckedExpr) -> Result<()> {
         match expr {
-            CheckedExpr::Var(name, ty) => {
+            CheckedExpr::Var(name, _ty) => {
                 // Using a variable
                 match self.vars.get(name) {
                     Some(OwnershipState::Owned) => {
                         // Reading owned value is fine (copy if primitive)
                     }
-                    Some(OwnershipState::Moved { to }) => {
+                    Some(OwnershipState::Moved { to: _ }) => {
                         return Err(OwnershipError::UseAfterMove { name: name.clone() });
                     }
                     Some(OwnershipState::MutBorrow) => {
                         // Can read through mutable borrow
                     }
-                    Some(OwnershipState::ImmBorrow { count }) => {
+                    Some(OwnershipState::ImmBorrow { count: _ }) => {
                         // Can read through immutable borrow
                     }
                     None => {
@@ -258,7 +258,7 @@ impl OwnershipChecker {
                 }
             }
 
-            CheckedExpr::Call { callee, args, result_ty } => {
+            CheckedExpr::Call { callee, args, result_ty: _ } => {
                 self.check_expr(callee)?;
                 for arg in args {
                     self.check_expr(arg)?;
@@ -383,7 +383,7 @@ impl OwnershipChecker {
                 self.check_expr(index)?;
             }
 
-            CheckedExpr::AsmBlock { instructions, outputs, inputs } => {
+            CheckedExpr::AsmBlock { instructions: _, outputs, inputs } => {
                 // Check output variables
                 for (name, _) in outputs {
                     // Output variables are borrowed mutably

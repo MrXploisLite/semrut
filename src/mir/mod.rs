@@ -1088,7 +1088,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             };
             ret_ty
         }
-        crate::sema::CheckedExpr::MethodCall { receiver, method, mangled, args, result_ty } => {
+        crate::sema::CheckedExpr::MethodCall { receiver, method: _, mangled, args, result_ty } => {
             let (recv_val, _) = build_expr(receiver, stmts, temp_counter, structs);
             let mut mir_args = vec![recv_val];
             for arg in args {
@@ -1269,8 +1269,8 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
                 .find(|s| s.name == mir_struct_name)
                 .map(|s| s.fields.iter().map(|f| sema_ty_to_mir(&f.1)).collect())
                 .unwrap_or_default();
-            for (i, (field_name, field_expr)) in fields.iter().enumerate() {
-                let (val, _ty) = build_expr(field_expr.clone(), stmts, temp_counter, structs);
+            for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
+                let (val, _ty) = build_expr(field_expr, stmts, temp_counter, structs);
                 let field_ty = field_tys.get(i).cloned().unwrap_or(MirType::Void);
                 stmts.push(MirStmt::StoreField {
                     struct_var: dest.clone(),

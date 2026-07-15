@@ -228,7 +228,7 @@ pub fn scan(source: &str, filename: &str) -> Result<Vec<Token>> {
                                 num.push(chars.next().unwrap().1);
                                 col += 1;
                                 while let Some(&(_, c)) = chars.peek() {
-                                    if (c == '0' || c == '1' || c == '_') {
+                                    if c == '0' || c == '1' || c == '_'  {
                                         num.push(chars.next().unwrap().1);
                                         col += 1;
                                     } else {
