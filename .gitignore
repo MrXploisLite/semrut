@@ -19,3 +19,11 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated LLVM IR
+*.ll
+
+# Temp test files
+examples/test_*.smr
+examples/test_*.exe
+NUL.*

@@ -232,6 +232,7 @@ struct Env {
     consts: HashMap<String, ConstInfo>,
     type_aliases: HashMap<String, Ty>,
     type_params: Vec<String>, // active type parameters in current scope
+    self_type: Option<Ty>, // Self type for impl blocks
 }
 
 impl Env {
@@ -245,6 +246,7 @@ impl Env {
             consts: HashMap::new(),
             type_aliases: HashMap::new(),
             type_params: Vec::new(),
+            self_type: None,
         };
 
         // Register builtin types
@@ -391,6 +393,11 @@ impl Env {
     fn resolve_type(&self, ty: &Type) -> Result<Ty> {
         match ty {
             Type::Named(s) => {
+                if s == "Self" {
+                    if let Some(ref st) = self.self_type {
+                        return Ok(st.clone());
+                    }
+                }
                 // Check if it's a type parameter
                 if self.type_params.contains(s) {
                     return Ok(Ty::GenericParam(s.clone()));
@@ -537,8 +544,16 @@ pub enum CheckedStmt {
     Loop {
         body: CheckedBlock,
     },
+    For {
+        var: String,
+        start: Box<CheckedExpr>,
+        end: Box<CheckedExpr>,
+        body: CheckedBlock,
+    },
     Block(CheckedBlock),
     Unsafe(CheckedBlock),
+    Break,
+    Continue,
 }
 
 pub enum CheckedExpr {
@@ -581,6 +596,7 @@ pub enum CheckedExpr {
     MethodCall {
         receiver: Box<CheckedExpr>,
         method: String,
+        mangled: String,
         args: Vec<CheckedExpr>,
         result_ty: Ty,
     },
@@ -589,6 +605,7 @@ pub enum CheckedExpr {
         method: String,
         args: Vec<CheckedExpr>,
         result_ty: Ty,
+        pos: String,
     },
     FieldAccess {
         receiver: Box<CheckedExpr>,
@@ -604,6 +621,7 @@ pub enum CheckedExpr {
         name: String,
         fields: Vec<(String, CheckedExpr)>,
         result_ty: Ty,
+        pos: String,
     },
     Index {
         target: Box<CheckedExpr>,
@@ -755,6 +773,8 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
             Item::Impl(impl_item) => {
                 // Validate target type exists
                 let target_ty = env.resolve_type(&impl_item.target_type)?;
+                // Set Self type for method resolution
+                env.self_type = Some(target_ty.clone());
                 // Set type params from impl block
                 env.type_params = impl_item.type_params.clone();
                 // Register methods
@@ -781,6 +801,7 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                     })?;
                 }
                 env.type_params.clear();
+                env.self_type = None;
             }
         }
     }
@@ -909,13 +930,22 @@ fn check_stmt(env: &mut Env, stmt: &Stmt, expected_ret: &Ty) -> Result<CheckedSt
             };
 
             // Check if value type is compatible
-            if !get_expr_type(&value)?.can_coerce(&ty) {
-                let got = get_expr_type(&value)?;
+            let value_ty = get_expr_type(&value)?;
+            if !value_ty.can_coerce(&ty) {
                 return Err(SemaError::TypeMismatch {
                     expected: ty.to_string(),
-                    got: got.to_string(),
+                    got: value_ty.to_string(),
                 });
             }
+
+            // Coerce literal types
+            let val_ty2 = get_expr_type(&value)?;
+            let value = match &value {
+                CheckedExpr::IntLit(n, _) if val_ty2.can_coerce(&ty) => {
+                    CheckedExpr::IntLit(*n, ty.clone())
+                }
+                _ => value,
+            };
 
             env.add_var(let_stmt.name.clone(), ty.clone(), let_stmt.mutable)?;
 
@@ -943,6 +973,13 @@ fn check_stmt(env: &mut Env, stmt: &Stmt, expected_ret: &Ty) -> Result<CheckedSt
                             got: val_ty.to_string(),
                         });
                     }
+                    // Coerce literal types
+                    let val = match &val {
+                        CheckedExpr::IntLit(n, t) if t.can_coerce(expected_ret) => {
+                            CheckedExpr::IntLit(*n, expected_ret.clone())
+                        }
+                        _ => val,
+                    };
                     Some(Box::new(val))
                 }
                 None => {
@@ -996,6 +1033,22 @@ fn check_stmt(env: &mut Env, stmt: &Stmt, expected_ret: &Ty) -> Result<CheckedSt
             Ok(CheckedStmt::Loop { body })
         }
 
+        Stmt::For(for_stmt) => {
+            let start = check_expr(env, &for_stmt.start)?;
+            let end = check_expr(env, &for_stmt.end)?;
+            let start_ty = get_expr_type(&start)?;
+            env.push_scope();
+            env.add_var(for_stmt.var.clone(), start_ty, false)?;
+            let body = check_block(env, &for_stmt.body, expected_ret)?;
+            env.pop_scope();
+            Ok(CheckedStmt::For {
+                var: for_stmt.var.clone(),
+                start: Box::new(start),
+                end: Box::new(end),
+                body,
+            })
+        }
+
         Stmt::Block(block) => {
             env.push_scope();
             let checked = check_block(env, block, expected_ret)?;
@@ -1009,6 +1062,9 @@ fn check_stmt(env: &mut Env, stmt: &Stmt, expected_ret: &Ty) -> Result<CheckedSt
             env.pop_scope();
             Ok(CheckedStmt::Unsafe(checked))
         }
+
+        Stmt::Break => Ok(CheckedStmt::Break),
+        Stmt::Continue => Ok(CheckedStmt::Continue),
     }
 }
 
@@ -1248,21 +1304,33 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
 
         Expr::MethodCall { receiver, method, args } => {
             let checked_receiver = check_expr(env, receiver)?;
-            let _receiver_ty = get_expr_type(&checked_receiver)?;
+            let receiver_ty = get_expr_type(&checked_receiver)?;
 
-            // For now, method calls are not fully supported
-            // TODO: resolve methods based on receiver type
+            let lookup_name = match &receiver_ty {
+                Ty::Struct(name) => format!("{}::{}", name, method),
+                _ => format!("??::{}", method),
+            };
+
+            let fn_info = env.lookup_fn(&lookup_name);
+            let result_ty = fn_info.as_ref().map(|f| f.ret_type.clone()).unwrap_or(Ty::Void);
+
+            // LLVM-safe name (used by MIR codegen)
+            let mangled = match &receiver_ty {
+                Ty::Struct(name) => format!("{}_{}", name, method),
+                _ => format!("??_{}", method),
+            };
+
             let mut checked_args = Vec::new();
             for arg in args {
                 checked_args.push(check_expr(env, arg)?);
             }
 
-            // Placeholder — assume returns void
             Ok(CheckedExpr::MethodCall {
                 receiver: Box::new(checked_receiver),
                 method: method.clone(),
+                mangled,
                 args: checked_args,
-                result_ty: Ty::Void,
+                result_ty,
             })
         }
 
@@ -1295,13 +1363,13 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
             }
         }
 
-        Expr::StaticCall { type_name, method, args } => {
+        Expr::StaticCall { type_name, method, args, pos } => {
             // Look up mangled function: TypeName::method
             let mangled = format!("{}::{}", type_name, method);
             let fn_info = env.lookup_fn(&mangled).ok_or_else(|| {
                 SemaError::UndefinedFn {
                     name: mangled.clone(),
-                    pos: "0".to_string(),
+                    pos: pos.clone(),
                 }
             })?;
 
@@ -1317,6 +1385,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                 method: method.clone(),
                 args: checked_args,
                 result_ty: fn_info.ret_type.clone(),
+                pos: pos.clone(),
             })
         }
 
@@ -1330,24 +1399,49 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
             })
         }
 
-        Expr::StructLit { name, fields } => {
+        Expr::StructLit { name, fields, pos } => {
             let struct_info = env.lookup_struct(name).ok_or_else(|| {
-                SemaError::UndefinedFn {
+                SemaError::UndefinedType {
                     name: name.clone(),
-                    pos: "0".to_string(),
+                    pos: pos.clone(),
                 }
             })?;
             let mut checked_fields = Vec::new();
             for (field_name, field_expr) in fields {
                 let checked = check_expr(env, field_expr)?;
-                // TODO: validate field type matches struct definition
-                checked_fields.push((field_name.clone(), checked));
+                let field_def = struct_info.fields.iter().find(|(n, _)| n == field_name);
+                match field_def {
+                    Some((_, expected_ty)) => {
+                        let val_ty = get_expr_type(&checked)?;
+                        if !val_ty.can_coerce(expected_ty) {
+                            return Err(SemaError::TypeMismatch {
+                                expected: expected_ty.to_string(),
+                                got: val_ty.to_string(),
+                            });
+                        }
+                        // Coerce literal types
+                        let checked = match &checked {
+                            CheckedExpr::IntLit(n, _) if val_ty.can_coerce(expected_ty) => {
+                                CheckedExpr::IntLit(*n, expected_ty.clone())
+                            }
+                            _ => checked,
+                        };
+                        checked_fields.push((field_name.clone(), checked));
+                    }
+                    None => {
+                        return Err(SemaError::FieldNotFound {
+                            field: field_name.clone(),
+                            ty: name.clone(),
+                        });
+                    }
+                }
             }
             let result_ty = Ty::Struct(name.clone());
             Ok(CheckedExpr::StructLit {
                 name: name.clone(),
                 fields: checked_fields,
                 result_ty,
+                pos: pos.clone(),
             })
         }
 

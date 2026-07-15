@@ -13,7 +13,7 @@ colored = "2.1"
 thiserror = "2.0"
 
 # LLVM bindings for codegen — inkwell 0.8 with LLVM 18, force-dynamic to avoid Polly issue
-inkwell = { version = "0.8", features = ["llvm18-1-force-dynamic", "target-all"] }
+inkwell = { version = "0.8", features = ["llvm18-1", "target-all"] }
 
 [dev-dependencies]
 insta = "1.41"

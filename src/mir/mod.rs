@@ -77,6 +77,13 @@ pub enum MirStmt {
         field_index: u32,
         field_ty: MirType,
     },
+    StoreField {
+        struct_var: String,
+        struct_name: String,
+        field_index: u32,
+        value: MirValue,
+        field_ty: MirType,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +265,9 @@ impl fmt::Display for MirProgram {
                         MirStmt::FieldAccess { dest, struct_var, struct_name, field_index, field_ty } => {
                             writeln!(f, "    {} = field {}.{}[{}] : {}", dest, struct_var, struct_name, field_index, field_ty)?;
                         }
+                        MirStmt::StoreField { struct_var, struct_name, field_index, value, field_ty } => {
+                            writeln!(f, "    {}.{}[{}] = {:?} : {}", struct_var, struct_name, field_index, value, field_ty)?;
+                        }
                     }
                 }
                 match &block.terminator {
@@ -371,7 +381,7 @@ fn build_function(func: &CheckedFn, structs: &[crate::sema::CheckedStruct]) -> M
     let ret_type = sema_ty_to_mir(&func.ret_type);
 
     // Build entry block (ID 0)
-    build_block(&func.body, &mut blocks, 0, &mut block_id, &mut temp_counter, ret_type.clone(), structs);
+    build_block(&func.body, &mut blocks, 0, &mut block_id, &mut temp_counter, ret_type.clone(), structs, &[]);
 
     MirFunction {
         name: func.name.clone(),
@@ -390,6 +400,7 @@ fn build_block(
     temp_counter: &mut usize,
     ret_type: MirType,
     structs: &[crate::sema::CheckedStruct],
+    loop_stack: &[(usize, usize)],
 ) {
     let mut stmts = Vec::new();
     let mut terminator = MirTerminator::Return(None);
@@ -459,7 +470,7 @@ fn build_block(
                 };
 
                 // Build then block
-                build_block(then_block, all_blocks, then_id, block_id, temp_counter, ret_type.clone(), structs);
+                build_block(then_block, all_blocks, then_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
                 // Patch: add jump to merge at end of then block (only preserve explicit return with value)
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == then_id) {
                     match &b.terminator {
@@ -470,7 +481,7 @@ fn build_block(
 
                 // Build else block if exists
                 if let Some(b) = else_block {
-                    build_block(b, all_blocks, else_id, block_id, temp_counter, ret_type.clone(), structs);
+                    build_block(b, all_blocks, else_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
                     if let Some(bb) = all_blocks.iter_mut().find(|bb| bb.id == else_id) {
                         match &bb.terminator {
                             MirTerminator::Return(Some(_)) => {} // keep explicit return
@@ -499,7 +510,7 @@ fn build_block(
                 }
 
                 // Remaining statements go into merge block
-                let merge_block = build_remaining(&remaining, merge_id, block_id, temp_counter, ret_type.clone(), structs);
+                let merge_block = build_remaining(&remaining, merge_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
                 all_blocks.push(merge_block);
 
                 // Push current block before returning
@@ -534,19 +545,22 @@ fn build_block(
                     },
                 });
 
-                // Body block — pass Void so implicit returns don't happen inside loop body
-                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs);
+                // Body block — push loop context so break/continue work
+                let mut inner_stack = loop_stack.to_vec();
+                inner_stack.push((header_id, exit_id));
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
-                    // For loop body: always jump back to header unless there's an explicit return with value
-                    match &b.terminator {
-                        MirTerminator::Return(Some(_)) => {} // keep explicit return
-                        _ => b.terminator = MirTerminator::Jump { target: header_id },
+                    let already_set = matches!(&b.terminator,
+                        MirTerminator::Jump { target } if *target != header_id
+                    );
+                    if !already_set {
+                        b.terminator = MirTerminator::Jump { target: header_id };
                     }
                 }
 
                 // Remaining statements go into exit block
                 let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
-                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs);
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
                 all_blocks.push(exit_block);
 
                 // Push current block before returning
@@ -560,16 +574,109 @@ fn build_block(
 
             crate::sema::CheckedStmt::Loop { body } => {
                 let body_id = *block_id + 1;
-                *block_id = body_id;
+                let exit_id = *block_id + 2;
+                *block_id = exit_id;
 
                 terminator = MirTerminator::Jump { target: body_id };
 
-                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs);
+                let mut inner_stack = loop_stack.to_vec();
+                inner_stack.push((body_id, exit_id));
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
-                    b.terminator = MirTerminator::Jump { target: body_id };
+                    let is_exit = matches!(&b.terminator, MirTerminator::Jump { target } if *target != body_id);
+                    if !is_exit {
+                        b.terminator = MirTerminator::Jump { target: body_id };
+                    }
                 }
 
+                let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                all_blocks.push(exit_block);
+
                 // Push current block
+                all_blocks.push(MirBlock {
+                    id: current_id,
+                    stmts,
+                    terminator,
+                });
+                return;
+            }
+
+            crate::sema::CheckedStmt::For { var, start, end, body } => {
+                // Lower for i in start..end to:
+                // let i = start; while i < end { body; i = i + 1; }
+                let header_id = *block_id + 1;
+                let body_id = *block_id + 2;
+                let exit_id = *block_id + 3;
+                *block_id = exit_id;
+
+                // Current block: i = start
+                let (start_val, _) = build_expr(start, &mut stmts, temp_counter, structs);
+                stmts.push(MirStmt::Assign { dest: var.clone(), value: start_val });
+                terminator = MirTerminator::Jump { target: header_id };
+
+                // Header block: i < end?
+                let mut header_stmts = Vec::new();
+                let (end_val, _) = build_expr(end, &mut header_stmts, temp_counter, structs);
+                let cond_name = format!("_for_cond_{}", header_id);
+                header_stmts.push(MirStmt::Assign {
+                    dest: cond_name.clone(),
+                    value: MirValue::Var(var.clone()),
+                });
+                // i < end
+                let cmp_name = format!("_for_cmp_{}", header_id);
+                let end_var_name = format!("_for_end_{}", header_id);
+                header_stmts.push(MirStmt::Assign {
+                    dest: end_var_name.clone(),
+                    value: end_val,
+                });
+                header_stmts.push(MirStmt::BinaryOp {
+                    dest: cmp_name.clone(),
+                    op: MirBinOp::Lt,
+                    left: MirValue::Var(var.clone()),
+                    right: MirValue::Var(end_var_name),
+                });
+                all_blocks.push(MirBlock {
+                    id: header_id,
+                    stmts: header_stmts,
+                    terminator: MirTerminator::Branch {
+                        cond: MirValue::Var(cmp_name),
+                        then_target: body_id,
+                        else_target: exit_id,
+                    },
+                });
+
+                // Body block with loop context for break/continue
+                let mut inner_stack = loop_stack.to_vec();
+                inner_stack.push((header_id, exit_id));
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
+                // At end of body, i = i + 1 and jump to header
+                if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
+                    let needs_inc = matches!(&b.terminator,
+                        MirTerminator::Jump { target } if *target == body_id
+                    ) || matches!(&b.terminator, MirTerminator::Return(None));
+                    if needs_inc || matches!(&b.terminator, MirTerminator::Jump { target } if *target == body_id) {
+                        let inc_name = format!("_for_inc_{}", body_id);
+                        let one = MirValue::Int(1, MirType::I64);
+                        b.stmts.push(MirStmt::BinaryOp {
+                            dest: inc_name.clone(),
+                            op: MirBinOp::Add,
+                            left: MirValue::Var(var.clone()),
+                            right: one,
+                        });
+                        b.stmts.push(MirStmt::Assign {
+                            dest: var.clone(),
+                            value: MirValue::Var(inc_name),
+                        });
+                        b.terminator = MirTerminator::Jump { target: header_id };
+                    }
+                }
+
+                // Remaining statements in exit block
+                let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                all_blocks.push(exit_block);
+
                 all_blocks.push(MirBlock {
                     id: current_id,
                     stmts,
@@ -600,6 +707,18 @@ fn build_block(
                             terminator = MirTerminator::Return(mir_val);
                             break;
                         }
+                        crate::sema::CheckedStmt::Break => {
+                            if let Some((_header, exit)) = loop_stack.last() {
+                                terminator = MirTerminator::Jump { target: *exit };
+                                break;
+                            }
+                        }
+                        crate::sema::CheckedStmt::Continue => {
+                            if let Some((header, _exit)) = loop_stack.last() {
+                                terminator = MirTerminator::Jump { target: *header };
+                                break;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -622,10 +741,37 @@ fn build_block(
                             };
                             terminator = MirTerminator::Return(mir_val);
                         }
+                        crate::sema::CheckedStmt::Break => {
+                            if let Some((_header, exit)) = loop_stack.last() {
+                                terminator = MirTerminator::Jump { target: *exit };
+                                break;
+                            }
+                        }
+                        crate::sema::CheckedStmt::Continue => {
+                            if let Some((header, _exit)) = loop_stack.last() {
+                                terminator = MirTerminator::Jump { target: *header };
+                                break;
+                            }
+                        }
                         _ => {}
                     }
                 }
                 i += 1;
+            }
+
+            crate::sema::CheckedStmt::Break => {
+                if let Some((_header, exit)) = loop_stack.last() {
+                    let t = MirTerminator::Jump { target: *exit };
+                    all_blocks.push(MirBlock { id: current_id, stmts, terminator: t });
+                    return;
+                }
+            }
+            crate::sema::CheckedStmt::Continue => {
+                if let Some((header, _exit)) = loop_stack.last() {
+                    let t = MirTerminator::Jump { target: *header };
+                    all_blocks.push(MirBlock { id: current_id, stmts, terminator: t });
+                    return;
+                }
             }
         }
     }
@@ -645,6 +791,7 @@ fn build_remaining(
     temp_counter: &mut usize,
     ret_type: MirType,
     structs: &[crate::sema::CheckedStruct],
+    loop_stack: &[(usize, usize)],
 ) -> MirBlock {
     let mut stmts = Vec::new();
     let mut terminator = MirTerminator::Return(None);
@@ -691,7 +838,7 @@ fn build_remaining(
                 };
 
                 // For nested if in remaining, we just build the then block and create a merge
-                build_block(then_block, &mut Vec::new(), then_id, block_id, temp_counter, ret_type.clone(), structs);
+                build_block(then_block, &mut Vec::new(), then_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
                 // This is simplified — nested control flow in remaining is not fully handled
                 break;
             }
@@ -734,6 +881,7 @@ fn process_stmt(
     ret_type: &MirType,
     block_id: &mut usize,
     structs: &[crate::sema::CheckedStruct],
+    loop_stack: &[(usize, usize)],
 ) {
     match stmt {
         crate::sema::CheckedStmt::Let { name, ty: _, value, mutable: _ } => {
@@ -755,7 +903,7 @@ fn process_stmt(
             let fake_id = 0;
             build_block(
                 &crate::sema::CheckedBlock { stmts: vec![] },
-                all_blocks, fake_id, block_id, temp_counter, ret_type.clone(), structs,
+                all_blocks, fake_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack,
             );
         }
         _ => {}
@@ -940,7 +1088,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             };
             ret_ty
         }
-        crate::sema::CheckedExpr::MethodCall { receiver, method, args, result_ty } => {
+        crate::sema::CheckedExpr::MethodCall { receiver, method, mangled, args, result_ty } => {
             let (recv_val, _) = build_expr(receiver, stmts, temp_counter, structs);
             let mut mir_args = vec![recv_val];
             for arg in args {
@@ -953,7 +1101,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
 
             stmts.push(MirStmt::Call {
                 dest: Some(dest.clone()),
-                func: method.clone(),
+                func: mangled.clone(),
                 args: mir_args,
             });
 
@@ -999,7 +1147,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             });
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
-        crate::sema::CheckedExpr::StaticCall { type_name, method, args, result_ty } => {
+        crate::sema::CheckedExpr::StaticCall { type_name, method, args, result_ty, .. } => {
             // Mangled name: TypeName_method
             let func_name = format!("{}_{}", type_name, method);
             let mut mir_args = Vec::new();
@@ -1036,7 +1184,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             let index_str = match &index_val {
                 MirValue::Var(v) => v.clone(),
                 MirValue::Int(n, _) => n.to_string(),
-                _ => "0".to_string(),
+                _ => "?".to_string(),
             };
             stmts.push(MirStmt::Assign {
                 dest: dest.clone(),
@@ -1113,13 +1261,24 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
 
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
-        crate::sema::CheckedExpr::StructLit { name, fields, result_ty } => {
+        crate::sema::CheckedExpr::StructLit { name, fields, result_ty, .. } => {
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
-            // For now, just evaluate all field expressions
-            // TODO: proper struct allocation and field stores
-            for (_field_name, field_expr) in fields {
-                build_expr(field_expr, stmts, temp_counter, structs);
+            let mir_struct_name = name.clone();
+            let field_tys: Vec<MirType> = structs.iter()
+                .find(|s| s.name == mir_struct_name)
+                .map(|s| s.fields.iter().map(|f| sema_ty_to_mir(&f.1)).collect())
+                .unwrap_or_default();
+            for (i, (field_name, field_expr)) in fields.iter().enumerate() {
+                let (val, _ty) = build_expr(field_expr.clone(), stmts, temp_counter, structs);
+                let field_ty = field_tys.get(i).cloned().unwrap_or(MirType::Void);
+                stmts.push(MirStmt::StoreField {
+                    struct_var: dest.clone(),
+                    struct_name: mir_struct_name.clone(),
+                    field_index: i as u32,
+                    value: val,
+                    field_ty,
+                });
             }
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }

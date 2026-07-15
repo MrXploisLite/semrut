@@ -216,6 +216,9 @@ impl OwnershipChecker {
             CheckedStmt::Loop { body } => {
                 self.check_block(body)?;
             }
+            CheckedStmt::For { body, .. } => {
+                self.check_block(body)?;
+            }
 
             CheckedStmt::Block(inner) => {
                 self.check_block(inner)?;
@@ -225,6 +228,8 @@ impl OwnershipChecker {
                 // Skip ownership checks inside unsafe blocks
                 let _ = inner;
             }
+
+            CheckedStmt::Break | CheckedStmt::Continue => {}
         }
 
         Ok(())
@@ -352,14 +357,14 @@ impl OwnershipChecker {
                 self.check_expr(operand)?;
             }
 
-            CheckedExpr::MethodCall { receiver, method: _, args, result_ty: _ } => {
+            CheckedExpr::MethodCall { receiver, args, .. } => {
                 self.check_expr(receiver)?;
                 for arg in args {
                     self.check_expr(arg)?;
                 }
             }
 
-            CheckedExpr::StaticCall { type_name: _, method: _, args, result_ty: _ } => {
+            CheckedExpr::StaticCall { type_name: _, method: _, args, .. } => {
                 for arg in args {
                     self.check_expr(arg)?;
                 }

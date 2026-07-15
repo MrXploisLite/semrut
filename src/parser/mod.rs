@@ -173,6 +173,25 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    fn parse_self_param(&mut self) -> Result<Param> {
+        self.advance(); // consume & or *
+        let is_mut = matches_kind(&self.peek().kind, "Mut");
+        if is_mut {
+            self.advance();
+        }
+        let name_tok = self.advance();
+        let name = match &name_tok.kind {
+            crate::lexer::TokenKind::Ident(s) => s.clone(),
+            _ => "self".to_string(),
+        };
+        let ty = if is_mut {
+            Type::Named("&mut Self".to_string())
+        } else {
+            Type::Named("&Self".to_string())
+        };
+        Ok(Param { name, ty })
+    }
+
     fn parse_param(&mut self) -> Result<Param> {
         let name_tok = self.advance();
         let name = match &name_tok.kind {
@@ -288,6 +307,17 @@ impl<'a> Parser<'a> {
             crate::lexer::TokenKind::If => self.parse_if_stmt(),
             crate::lexer::TokenKind::While => self.parse_while_stmt(),
             crate::lexer::TokenKind::Loop => self.parse_loop_stmt(),
+            crate::lexer::TokenKind::For => self.parse_for_stmt(),
+            crate::lexer::TokenKind::Break => {
+                self.advance();
+                if matches_kind(&self.peek().kind, "Semi") { self.advance(); }
+                Ok(Stmt::Break)
+            }
+            crate::lexer::TokenKind::Continue => {
+                self.advance();
+                if matches_kind(&self.peek().kind, "Semi") { self.advance(); }
+                Ok(Stmt::Continue)
+            }
             crate::lexer::TokenKind::Unsafe => self.parse_unsafe_block(),
             crate::lexer::TokenKind::LBrace => {
                 let block = self.parse_block()?;
@@ -403,6 +433,27 @@ impl<'a> Parser<'a> {
         self.expect("Loop")?;
         let body = self.parse_block()?;
         Ok(Stmt::Loop(LoopStmt { body }))
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<Stmt> {
+        self.expect("For")?;
+        let name_tok = self.advance();
+        let var = match &name_tok.kind {
+            crate::lexer::TokenKind::Ident(s) => s.clone(),
+            _ => {
+                return Err(ParserError::UnexpectedToken {
+                    expected: "variable name".to_string(),
+                    got: token_desc(&name_tok.kind),
+                    pos: name_tok.span.start.to_string(),
+                });
+            }
+        };
+        self.expect("In")?;
+        let start = self.parse_expr()?;
+        self.expect("DotDot")?;
+        let end = self.parse_expr()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::For(ForStmt { var, start, end, body }))
     }
 
     fn parse_unsafe_block(&mut self) -> Result<Stmt> {
@@ -657,13 +708,14 @@ impl<'a> Parser<'a> {
                     // Type::method() or Type::CONST
                     self.advance();
                     let name_tok = self.advance();
+                    let name_tok_pos = name_tok.span.start.to_string();
                     let name = match &name_tok.kind {
                         crate::lexer::TokenKind::Ident(s) => s.clone(),
                         _ => {
                             return Err(ParserError::UnexpectedToken {
                                 expected: "identifier after ::".to_string(),
                                 got: token_desc(&name_tok.kind),
-                                pos: name_tok.span.start.to_string(),
+                                pos: name_tok_pos.clone(),
                             });
                         }
                     };
@@ -690,7 +742,7 @@ impl<'a> Parser<'a> {
                                 return Err(ParserError::UnexpectedToken {
                                     expected: "type name before ::".to_string(),
                                     got: "expression".to_string(),
-                                    pos: "0".to_string(),
+                                    pos: name_tok_pos.clone(),
                                 });
                             }
                         };
@@ -698,6 +750,7 @@ impl<'a> Parser<'a> {
                             type_name,
                             method: name,
                             args,
+                            pos: name_tok_pos.clone(),
                         };
                     } else {
                         // Type::CONST or Type::FIELD
@@ -707,7 +760,7 @@ impl<'a> Parser<'a> {
                                 return Err(ParserError::UnexpectedToken {
                                     expected: "type name before ::".to_string(),
                                     got: "expression".to_string(),
-                                    pos: "0".to_string(),
+                                    pos: name_tok_pos,
                                 });
                             }
                         };
@@ -719,16 +772,22 @@ impl<'a> Parser<'a> {
                 }
                 crate::lexer::TokenKind::LBrace => {
                     // Struct literal: TypeName { field: value, ... }
+                    // Only parse as struct literal if preceded by a Var AND
+                    // the first token inside { is an ident followed by :
                     let name = match &expr {
                         Expr::Var(name) => name.clone(),
-                        _ => {
-                            return Err(ParserError::UnexpectedToken {
-                                expected: "type name before {".to_string(),
-                                got: "expression".to_string(),
-                                pos: "0".to_string(),
-                            });
-                        }
+                        _ => break,
                     };
+                    // Peek ahead: if } or ident: then struct literal, else break
+                    let is_struct = self.pos + 1 < self.tokens.len()
+                        && (matches_kind(&self.tokens[self.pos + 1].kind, "RBrace")
+                            || (self.pos + 2 < self.tokens.len()
+                                && matches_kind(&self.tokens[self.pos + 1].kind, "Ident")
+                                && matches_kind(&self.tokens[self.pos + 2].kind, "Colon")));
+                    if !is_struct {
+                        break;
+                    }
+                    let lbrace_pos = self.peek().span.start.to_string();
                     self.advance();
                     let mut fields = Vec::new();
                     while !matches_kind(&self.peek().kind, "RBrace") {
@@ -751,7 +810,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect("RBrace")?;
-                    expr = Expr::StructLit { name, fields };
+                    expr = Expr::StructLit { name, fields, pos: lbrace_pos };
                 }
                 crate::lexer::TokenKind::LBracket => {
                     self.advance();
@@ -1076,7 +1135,7 @@ impl<'a> Parser<'a> {
                     return Err(ParserError::UnexpectedToken {
                         expected: "trait name".to_string(),
                         got: "complex type".to_string(),
-                        pos: "0".to_string(),
+                        pos: self.peek().span.start.to_string(),
                     });
                 }
             };
@@ -1107,20 +1166,33 @@ impl<'a> Parser<'a> {
             let mut params = Vec::new();
             if !matches_kind(&self.peek().kind, "RParen") {
                 loop {
-                    let name_tok = self.advance();
-                    let param_name = match &name_tok.kind {
-                        crate::lexer::TokenKind::Ident(s) => s.clone(),
-                        _ => {
-                            return Err(ParserError::UnexpectedToken {
-                                expected: "parameter name".to_string(),
-                                got: token_desc(&name_tok.kind),
-                                pos: name_tok.span.start.to_string(),
-                            });
+                    // Check for self/&self/&mut self shorthand
+                    let is_self = matches_kind(&self.peek().kind, "Amp");
+                    if is_self {
+                        let param = self.parse_self_param()?;
+                        params.push(param);
+                    } else {
+                        let name_tok = self.advance();
+                        let param_name = match &name_tok.kind {
+                            crate::lexer::TokenKind::Ident(s) => s.clone(),
+                            _ => {
+                                return Err(ParserError::UnexpectedToken {
+                                    expected: "parameter name".to_string(),
+                                    got: token_desc(&name_tok.kind),
+                                    pos: name_tok.span.start.to_string(),
+                                });
+                            }
+                        };
+                        let is_self_shorthand = param_name == "self"
+                            && !matches_kind(&self.peek().kind, "Colon");
+                        if is_self_shorthand {
+                            params.push(Param { name: param_name, ty: crate::parser::ast::Type::Named("Self".to_string()) });
+                        } else {
+                            self.expect("Colon")?;
+                            let ty = self.parse_type()?;
+                            params.push(Param { name: param_name, ty });
                         }
-                    };
-                    self.expect("Colon")?;
-                    let ty = self.parse_type()?;
-                    params.push(Param { name: param_name, ty });
+                    }
 
                     if matches_kind(&self.peek().kind, "Comma") {
                         self.advance();

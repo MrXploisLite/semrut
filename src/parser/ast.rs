@@ -136,8 +136,19 @@ pub enum Stmt {
     If(IfStmt),
     While(WhileStmt),
     Loop(LoopStmt),
+    For(ForStmt),
+    Break,
+    Continue,
     Block(Block),
     Unsafe(Block),
+}
+
+#[derive(Debug, Clone)]
+pub struct ForStmt {
+    pub var: String,
+    pub start: Expr,
+    pub end: Expr,
+    pub body: Block,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +223,7 @@ pub enum Expr {
         type_name: String,
         method: String,
         args: Vec<Expr>,
+        pos: String,
     },
     FieldAccess {
         receiver: Box<Expr>,
@@ -224,6 +236,7 @@ pub enum Expr {
     StructLit {
         name: String,
         fields: Vec<(String, Expr)>,
+        pos: String,
     },
     Index {
         target: Box<Expr>,

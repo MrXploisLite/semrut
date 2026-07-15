@@ -700,6 +700,40 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
 
             state.create_var(dest, field_val)?;
         }
+
+        MirStmt::StoreField { struct_var, struct_name, field_index, value, field_ty: _ } => {
+            // Get or create the struct alloca
+            let struct_ty = *state.struct_types.get(struct_name)
+                .ok_or_else(|| CodegenError::LlvmError {
+                    msg: format!("unknown struct type '{}'", struct_name),
+                })?;
+
+            let struct_ptr = if !state.allocas.contains_key(struct_var) {
+                let ptr = state.builder.build_alloca(struct_ty, struct_var)
+                    .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
+                state.allocas.insert(struct_var.clone(), (ptr, struct_ty.into()));
+                ptr
+            } else {
+                let (ptr, _) = state.allocas.get(struct_var)
+                    .ok_or_else(|| CodegenError::LlvmError {
+                        msg: format!("undefined variable '{}'", struct_var),
+                    })?;
+                *ptr
+            };
+
+            let field_ptr = unsafe {
+                state.builder.build_struct_gep(
+                    struct_ty,
+                    struct_ptr,
+                    *field_index,
+                    &format!("{}_gep_{}", struct_var, field_index),
+                ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
+            };
+
+            let val = resolve_value(state, value)?;
+            state.builder.build_store(field_ptr, val)
+                .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
+        }
     }
 
     Ok(())

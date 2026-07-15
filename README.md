@@ -16,7 +16,7 @@ SemRut (smrc) is a systems programming language that combines the low-level cont
 ### Prerequisites
 
 - Rust toolchain (for building smrc)
-- LLVM 18
+- LLVM 18 (`llc-18`, `clang`, `llvm-config`)
 
 ### Build the Compiler
 
@@ -27,6 +27,14 @@ cargo build --release
 ```
 
 The compiler binary is at `target/release/smrc`.
+
+### Windows Setup
+
+On Windows, install LLVM 18 via winget:
+```powershell
+winget install LLVM.LLVM --version 18.1.8
+```
+Then download `clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz` from the [LLVM releases page](https://github.com/llvm/llvm-project/releases/tag/llvmorg-18.1.8) and extract `llc.exe`, `llvm-config.exe` to your PATH.
 
 ### Compile Your First Program
 
@@ -235,9 +243,9 @@ Options:
 - [x] MIR builder (basic blocks, SSA-like, explicit control flow)
 - [x] LLVM codegen (inkwell 0.8, LLVM 18, opaque pointers)
 - [x] Standard library (print, print_int, alloc, free, memcpy, memset)
-- [x] Control flow (if/else, while, loop, return, implicit return)
-- [x] Structs with methods (`impl` blocks, static calls `Type::method()`)
-- [x] Struct literals (`Type { field: value, ... }`)
+- [x] Control flow (if/else, while, loop, for..in, break, continue, return, implicit return)
+- [x] Method calls with receiver (`receiver.method()`) and `self` shorthand
+- [x] Struct literals with field type validation (`Type { field: value, ... }`)
 - [x] Struct field access (LLVM GEP via `build_struct_gep`)
 - [x] Enums with pattern matching (`match` expressions, enum destructuring)
 - [x] Generics (type parameters `<T, U>`, type inference from call args)
@@ -245,6 +253,7 @@ Options:
 - [x] Inline assembly (`asm { out/in/constraints }`)
 - [x] Undefined values (`let x: T = undefined`)
 - [x] References and dereferencing (`&mut`, `*`)
+- [x] Source location tracking in error messages
 
 ## Roadmap
 
