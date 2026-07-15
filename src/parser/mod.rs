@@ -174,20 +174,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_self_param(&mut self) -> Result<Param> {
-        self.advance(); // consume & or *
-        let is_mut = matches_kind(&self.peek().kind, "Mut");
-        if is_mut {
-            self.advance();
+        let is_ref = matches_kind(&self.peek().kind, "Amp") || matches_kind(&self.peek().kind, "Star");
+        if is_ref {
+            self.advance(); // consume & or *
+        }
+        let has_mut = matches_kind(&self.peek().kind, "Mut");
+        let is_mut = has_mut;
+        if has_mut {
+            self.advance(); // consume mut
         }
         let name_tok = self.advance();
         let name = match &name_tok.kind {
             crate::lexer::TokenKind::Ident(s) => s.clone(),
             _ => "self".to_string(),
         };
-        let ty = if is_mut {
+        let ty = if is_ref && is_mut {
             Type::Named("&mut Self".to_string())
-        } else {
+        } else if is_ref {
             Type::Named("&Self".to_string())
+        } else if is_mut {
+            Type::Named("Self".to_string())
+        } else {
+            Type::Named("Self".to_string())
         };
         Ok(Param { name, ty })
     }
@@ -1166,20 +1174,21 @@ impl<'a> Parser<'a> {
             let mut params = Vec::new();
             if !matches_kind(&self.peek().kind, "RParen") {
                 loop {
-                    // Check for self/&self/&mut self shorthand
-                    let is_self = matches_kind(&self.peek().kind, "Amp");
-                    if is_self {
+                    let kind = self.peek().kind.clone();
+                    let is_ref_self = matches_kind(&kind, "Amp");
+                    let is_mut_self = matches_kind(&kind, "Mut");
+                    if is_ref_self || is_mut_self {
                         let param = self.parse_self_param()?;
                         params.push(param);
                     } else {
-                        let name_tok = self.advance();
-                        let param_name = match &name_tok.kind {
+                        let param_tok = self.advance();
+                        let param_name = match &param_tok.kind {
                             crate::lexer::TokenKind::Ident(s) => s.clone(),
                             _ => {
                                 return Err(ParserError::UnexpectedToken {
                                     expected: "parameter name".to_string(),
-                                    got: token_desc(&name_tok.kind),
-                                    pos: name_tok.span.start.to_string(),
+                                    got: token_desc(&param_tok.kind),
+                                    pos: param_tok.span.start.to_string(),
                                 });
                             }
                         };
