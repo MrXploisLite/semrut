@@ -258,7 +258,7 @@ impl OwnershipChecker {
                 }
             }
 
-            CheckedExpr::Call { callee, args, result_ty: _ } => {
+            CheckedExpr::Call { callee, args, result_ty: _, mono_name: _ } => {
                 self.check_expr(callee)?;
                 for arg in args {
                     self.check_expr(arg)?;

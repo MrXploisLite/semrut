@@ -415,7 +415,7 @@ fn build_block(
                 let (val, val_ty) = build_expr(value, &mut stmts, temp_counter, structs);
                 let mir_ty = sema_ty_to_mir(ty);
                 // Use declared type if value is undefined/never
-                let final_val = if matches!(val_ty, MirType::Void) {
+                let mut final_val = if matches!(val_ty, MirType::Void) {
                     // Create a zero-initialized value of the declared type
                     match &mir_ty {
                         MirType::I8 | MirType::I16 | MirType::I32 | MirType::I64 | MirType::I128 |
@@ -427,6 +427,20 @@ fn build_block(
                 } else {
                     val
                 };
+                // Widen/narrow int values whose type differs from the declaration
+                // (e.g. a generic call defaulted to i32 but assigned to an i64 let).
+                if val_ty != mir_ty {
+                    let widen = matches!(mir_ty, MirType::I64) && matches!(val_ty, MirType::I32);
+                    if widen {
+                        let cast_dest = format!("_widen_{}", name);
+                        stmts.push(MirStmt::Cast {
+                            dest: cast_dest.clone(),
+                            value: final_val,
+                            target_ty: mir_ty.clone(),
+                        });
+                        final_val = MirValue::Var(cast_dest);
+                    }
+                }
                 stmts.push(MirStmt::Assign {
                     dest: name.clone(),
                     value: final_val,
@@ -993,9 +1007,12 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             });
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
-        crate::sema::CheckedExpr::Call { callee, args, result_ty } => {
+        crate::sema::CheckedExpr::Call { callee, args, result_ty, mono_name } => {
             let func_name = match callee.as_ref() {
-                crate::sema::CheckedExpr::Var(name, _) => name.clone(),
+                crate::sema::CheckedExpr::Var(name, _) => {
+                    // Generic calls resolve to their specialized instantiation.
+                    mono_name.clone().unwrap_or_else(|| name.clone())
+                }
                 _ => "unknown".to_string(),
             };
 

@@ -165,6 +165,18 @@ impl<'a> Parser<'a> {
                 };
                 params.push(name);
 
+                // Trait bounds (`<T: Show, U>`) are parsed and discarded for now:
+                // bounds checking lands with trait method resolution.
+                if matches_kind(&self.peek().kind, "Colon") {
+                    self.advance(); // consume ':'
+                    // bound list: TraitName (+ TraitName)*
+                    self.expect("Ident")?;
+                    while matches_kind(&self.peek().kind, "Plus") {
+                        self.advance(); // consume '+'
+                        self.expect("Ident")?;
+                    }
+                }
+
                 if matches_kind(&self.peek().kind, "Comma") {
                     self.advance();
                 } else {
@@ -1478,6 +1490,8 @@ fn matches_expected(kind: &crate::lexer::TokenKind, expected: &str) -> bool {
         (_, "Mut") => matches!(kind, crate::lexer::TokenKind::Mut),
         (_, "Gt") => matches!(kind, crate::lexer::TokenKind::Gt),
         (_, "Lt") => matches!(kind, crate::lexer::TokenKind::Lt),
+        // Identifiers: expect("Ident") must accept any identifier token
+        (crate::lexer::TokenKind::Ident(_), "Ident") => true,
         _ => false,
     }
 }

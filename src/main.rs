@@ -95,7 +95,7 @@ fn main() {
     }
 
     // Phase 3: Semantic analysis + type checking (reports every broken function)
-    let checked = match sema::check(&ast) {
+    let mut checked = match sema::check(&ast) {
         Ok(c) => c,
         Err(errors) => {
             for e in &errors {
@@ -110,6 +110,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Phase 3.5: Monomorphize generic functions into concrete specializations
+    sema::monomorphize(&mut checked);
 
     if args.dump_types {
         for func in &checked.functions {

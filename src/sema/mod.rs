@@ -505,6 +505,7 @@ pub struct CheckedProgram {
     pub impls: Vec<CheckedImpl>,
 }
 
+#[derive(Clone)]
 pub struct CheckedImpl {
     pub trait_name: Option<String>,
     pub target_type: Ty,
@@ -512,6 +513,7 @@ pub struct CheckedImpl {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct CheckedFn {
     pub name: String,
     pub type_params: Vec<String>,
@@ -521,10 +523,12 @@ pub struct CheckedFn {
     pub is_pub: bool,
 }
 
+#[derive(Clone)]
 pub struct CheckedBlock {
     pub stmts: Vec<CheckedStmt>,
 }
 
+#[derive(Clone)]
 pub enum CheckedStmt {
     Let {
         name: String,
@@ -561,6 +565,7 @@ pub enum CheckedStmt {
     Continue,
 }
 
+#[derive(Clone)]
 pub enum CheckedExpr {
     IntLit(i64, Ty),
     FloatLit(f64, Ty),
@@ -597,6 +602,9 @@ pub enum CheckedExpr {
         callee: Box<CheckedExpr>,
         args: Vec<CheckedExpr>,
         result_ty: Ty,
+        /// Set for generic calls after monomorphization planning:
+        /// the specialized function name this call resolves to.
+        mono_name: Option<String>,
     },
     MethodCall {
         receiver: Box<CheckedExpr>,
@@ -655,12 +663,14 @@ pub enum CheckedExpr {
     },
 }
 
+#[derive(Clone)]
 pub struct CheckedMatchArm {
     pub pattern: CheckedPattern,
     pub guard: Option<CheckedExpr>,
     pub body: CheckedExpr,
 }
 
+#[derive(Clone)]
 pub enum CheckedPattern {
     Wildcard,
     Binding { name: String },
@@ -672,18 +682,21 @@ pub enum CheckedPattern {
     Literal { value: i64 },
 }
 
+#[derive(Clone)]
 pub struct CheckedStruct {
     pub name: String,
     pub fields: Vec<(String, Ty)>,
 }
 
 #[allow(dead_code)] // name/variants consumed by future enum lowering
+#[derive(Clone)]
 pub struct CheckedEnum {
     pub name: String,
     pub variants: Vec<EnumVariantInfo>,
 }
 
 #[allow(dead_code)] // consts not yet lowered to MIR
+#[derive(Clone)]
 pub struct CheckedConst {
     pub name: String,
     pub ty: Ty,
@@ -700,6 +713,225 @@ impl From<SemaError> for Vec<SemaError> {
 }
 
 pub type CheckResult = std::result::Result<CheckedProgram, Vec<SemaError>>;
+
+
+/// Monomorphization: clone generic functions into concrete specializations.
+///
+/// For each generic fn, collect the distinct instantiations referenced by
+/// `Call.mono_name` across the program, substitute GenericParam types with the
+/// concrete ones in params/ret/body, rename to `<name>__<concrete>`, and emit
+/// those. The generic originals are dropped (they were never emitted as real
+/// functions anyway — codegen mapped GenericParam to a placeholder).
+pub fn monomorphize(program: &mut CheckedProgram) {
+    use std::collections::HashMap;
+
+    // Collect instantiations per generic fn from all call sites.
+    let mut wanted: HashMap<String, Vec<String>> = HashMap::new(); // fn name -> mono names
+    for func in &program.functions {
+        collect_mono_names(&func.body, &mut wanted);
+    }
+
+    let mut specialized: Vec<CheckedFn> = Vec::new();
+    let generics: Vec<(String, Vec<String>, CheckedFn)> = program
+        .functions
+        .iter()
+        .filter(|f| !f.type_params.is_empty())
+        .map(|f| (f.name.clone(), f.type_params.clone(), f.clone()))
+        .collect();
+    for (fname, type_params, func) in &generics {
+        let Some(mono_names) = wanted.get(fname) else {
+            continue;
+        };
+        // Distinct suffixes map 1:1 to concrete type tuples; recover them by
+        // re-deriving subst from the mono_name suffix.
+        for mono in mono_names {
+            let suffix = mono
+                .strip_prefix(&format!("{}__", fname))
+                .unwrap_or_default()
+                .to_string();
+            let ty_names: Vec<&str> = suffix.split('_').filter(|t| !t.is_empty()).collect();
+            if ty_names.len() != type_params.len() {
+                continue;
+            }
+            let subst: HashMap<String, Ty> = type_params
+                .iter()
+                .zip(ty_names.iter())
+                .filter_map(|(tp, tn)| parse_ty_name(tn).map(|t| (tp.clone(), t)))
+                .collect();
+
+            let mut spec = func.clone();
+            spec.name = mono.clone();
+            spec.type_params.clear();
+            substitute_fn(&mut spec, &subst);
+            specialized.push(spec);
+        }
+    }
+
+    // Drop generics that were fully specialized; keep any generic never called
+    // (they compile to placeholder codegen but preserve semantics for direct refs).
+    program.functions.retain(|f| f.type_params.is_empty());
+    program.functions.extend(specialized);
+}
+
+fn collect_mono_names(block: &CheckedBlock, out: &mut HashMap<String, Vec<String>>) {
+    for stmt in &block.stmts {
+        collect_stmt(stmt, out);
+    }
+}
+
+fn collect_stmt(stmt: &CheckedStmt, out: &mut HashMap<String, Vec<String>>) {
+    match stmt {
+        CheckedStmt::Let { value, .. } => collect_expr(value, out),
+        CheckedStmt::Expr(e, _) => collect_expr(e, out),
+        CheckedStmt::Return(Some(e)) => collect_expr(e, out),
+        CheckedStmt::If { cond, then_block, else_block } => {
+            collect_expr(cond, out);
+            collect_mono_names(then_block, out);
+            if let Some(b) = else_block {
+                collect_mono_names(b, out);
+            }
+        }
+        CheckedStmt::While { cond, body } => {
+            collect_expr(cond, out);
+            collect_mono_names(body, out);
+        }
+        CheckedStmt::Loop { body } => collect_mono_names(body, out),
+        CheckedStmt::For { start, end, body, .. } => {
+            collect_expr(start, out);
+            collect_expr(end, out);
+            collect_mono_names(body, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_expr(expr: &CheckedExpr, out: &mut HashMap<String, Vec<String>>) {
+    match expr {
+        CheckedExpr::Call { callee, args, mono_name, .. } => {
+            if let (CheckedExpr::Var(name, _), Some(mono)) = (callee.as_ref(), mono_name) {
+                let entry = out.entry(name.clone()).or_default();
+                if !entry.contains(mono) {
+                    entry.push(mono.clone());
+                }
+            }
+            for a in args {
+                collect_expr(a, out);
+            }
+        }
+        CheckedExpr::Binary { left, right, .. } => {
+            collect_expr(left, out);
+            collect_expr(right, out);
+        }
+        CheckedExpr::Unary { operand, .. } => collect_expr(operand, out),
+        _ => {}
+    }
+}
+
+fn parse_ty_name(name: &str) -> Option<Ty> {
+    match name {
+        "i8" => Some(Ty::I8),
+        "i16" => Some(Ty::I16),
+        "i32" => Some(Ty::I32),
+        "i64" => Some(Ty::I64),
+        "i128" => Some(Ty::I128),
+        "u8" => Some(Ty::U8),
+        "u16" => Some(Ty::U16),
+        "u32" => Some(Ty::U32),
+        "u64" => Some(Ty::U64),
+        "u128" => Some(Ty::U128),
+        "f32" => Some(Ty::F32),
+        "f64" => Some(Ty::F64),
+        "bool" => Some(Ty::Bool),
+        "char" => Some(Ty::Char),
+        _ => None,
+    }
+}
+
+fn substitute_fn(func: &mut CheckedFn, subst: &HashMap<String, Ty>) {
+    for (_, ty) in &mut func.params {
+        *ty = substitute_ty(ty, subst);
+    }
+    func.ret_type = substitute_ty(&func.ret_type, subst);
+    substitute_block(&mut func.body, subst);
+}
+
+fn substitute_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::GenericParam(n) => subst.get(n).cloned().unwrap_or(ty.clone()),
+        Ty::Ptr(inner) => Ty::Ptr(Box::new(substitute_ty(inner, subst))),
+        Ty::Ref { mutable, inner } => Ty::Ref {
+            mutable: *mutable,
+            inner: Box::new(substitute_ty(inner, subst)),
+        },
+        Ty::Array(inner, len) => Ty::Array(Box::new(substitute_ty(inner, subst)), *len),
+        Ty::Slice(inner) => Ty::Slice(Box::new(substitute_ty(inner, subst))),
+        other => other.clone(),
+    }
+}
+
+fn substitute_block(block: &mut CheckedBlock, subst: &HashMap<String, Ty>) {
+    for stmt in &mut block.stmts {
+        substitute_stmt(stmt, subst);
+    }
+}
+
+fn substitute_stmt(stmt: &mut CheckedStmt, subst: &HashMap<String, Ty>) {
+    match stmt {
+        CheckedStmt::Let { ty, value, .. } => {
+            *ty = substitute_ty(ty, subst);
+            substitute_expr(value, subst);
+        }
+        CheckedStmt::Expr(e, _) => substitute_expr(e, subst),
+        CheckedStmt::Return(Some(e)) => substitute_expr(e, subst),
+        CheckedStmt::If { cond, then_block, else_block } => {
+            substitute_expr(cond, subst);
+            substitute_block(then_block, subst);
+            if let Some(b) = else_block {
+                substitute_block(b, subst);
+            }
+        }
+        CheckedStmt::While { cond, body } => {
+            substitute_expr(cond, subst);
+            substitute_block(body, subst);
+        }
+        CheckedStmt::Loop { body } => substitute_block(body, subst),
+        CheckedStmt::For { start, end, body, .. } => {
+            substitute_expr(start, subst);
+            substitute_expr(end, subst);
+            substitute_block(body, subst);
+        }
+        _ => {}
+    }
+}
+
+fn substitute_expr(expr: &mut CheckedExpr, subst: &HashMap<String, Ty>) {
+    match expr {
+        CheckedExpr::IntLit(_, ty) | CheckedExpr::FloatLit(_, ty) => {
+            *ty = substitute_ty(ty, subst);
+        }
+        CheckedExpr::Var(_, ty) => *ty = substitute_ty(ty, subst),
+        CheckedExpr::Binary { left, right, result_ty, .. } => {
+            substitute_expr(left, subst);
+            substitute_expr(right, subst);
+            *result_ty = substitute_ty(result_ty, subst);
+        }
+        CheckedExpr::Unary { operand, result_ty, .. } => {
+            substitute_expr(operand, subst);
+            *result_ty = substitute_ty(result_ty, subst);
+        }
+        CheckedExpr::Call { callee, args, result_ty, .. } => {
+            substitute_expr(callee, subst);
+            for a in args {
+                substitute_expr(a, subst);
+            }
+            *result_ty = substitute_ty(result_ty, subst);
+        }
+        CheckedExpr::Undefined(ty) => {
+            *ty = substitute_ty(ty, subst);
+        }
+        _ => {}
+    }
+}
 
 pub fn check(program: &Program) -> CheckResult {
     let mut env = Env::new();
@@ -1273,6 +1505,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
 
             // If function has type parameters, infer them from arguments
             let mut subst: HashMap<String, Ty> = HashMap::new();
+            let was_generic = !fn_info.type_params.is_empty();
             if !fn_info.type_params.is_empty() {
                 // First, check all arguments to get their types
                 let mut arg_tys: Vec<(CheckedExpr, Ty)> = Vec::new();
@@ -1282,12 +1515,24 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                     arg_tys.push((checked_arg, arg_ty));
                 }
 
-                // Infer type parameters from arguments
-                for (i, (_checked_arg, arg_ty)) in arg_tys.iter().enumerate() {
+                // Infer type parameters from arguments. Untyped int literals are
+                // skipped: they default to i64 and would wrongly pin T when the
+                // call context wants a narrower type (`let n: i32 = id(40)`).
+                // The literal gets coerced to the concrete param type afterwards.
+                for (i, (checked_arg, arg_ty)) in arg_tys.iter().enumerate() {
+                    if matches!(checked_arg, CheckedExpr::IntLit(_, _)) {
+                        continue;
+                    }
                     if i < fn_info.params.len() {
                         let param_ty = &fn_info.params[i].1;
                         infer_types(param_ty, arg_ty, &mut subst)?;
                     }
+                }
+
+                // Default any still-uninferred params so the check below passes;
+                // the concrete value comes from the coerced literal.
+                for tp in &fn_info.type_params.clone() {
+                    subst.entry(tp.clone()).or_insert(Ty::I32);
                 }
 
                 // Check that all type parameters were inferred
@@ -1326,8 +1571,29 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                         got: arg_ty.to_string(),
                     });
                 }
-                checked_args.push(checked_arg);
+                // Coerce int literals to the concrete param type so codegen
+                // emits the right width (e.g. display(40) with T = i32).
+                let coerced_arg = match (checked_arg, expected_ty) {
+                    (CheckedExpr::IntLit(n, _), Ty::I32) => CheckedExpr::IntLit(n, Ty::I32),
+                    (CheckedExpr::IntLit(n, _), Ty::I64) => CheckedExpr::IntLit(n, Ty::I64),
+                    (other, _) => other,
+                };
+                checked_args.push(coerced_arg);
             }
+
+            // Plan monomorphization: if the fn was generic, name the
+            // specialization after its concrete parameter types.
+            let mono_name = if was_generic {
+                let suffix: String = fn_info
+                    .params
+                    .iter()
+                    .map(|(_, ty)| ty.to_string())
+                    .collect::<Vec<_>>()
+                    .join("_");
+                Some(format!("{}__{}", fn_info.name, suffix))
+            } else {
+                None
+            };
 
             Ok(CheckedExpr::Call {
                 callee: Box::new(CheckedExpr::Var(fn_info.name.clone(), Ty::Fn(
@@ -1335,7 +1601,8 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                     Box::new(fn_info.ret_type.clone()),
                 ))),
                 args: checked_args,
-                result_ty: fn_info.ret_type,
+                result_ty: fn_info.ret_type.clone(),
+                mono_name,
             })
         }
 
