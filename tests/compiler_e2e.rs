@@ -192,3 +192,39 @@ pub fn main() -> i32 {
     let bin = compile_ok("for_range", src);
     assert_eq!(run_exit_code(&bin), 35);
 }
+
+#[test]
+fn multiple_errors_reported_together() {
+    // Two functions, each with its own error: both must appear in stderr.
+    let src = r#"
+fn bad_one() -> i32 {
+    return nonexistent + 1;
+}
+
+pub fn main() -> i32 {
+    return 0;
+}
+
+fn bad_two() -> i32 {
+    let x: bool = 42;
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("smrc_multi_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let src_path = dir.join("multi.smr");
+    let bin = dir.join("multi");
+    std::fs::write(&src_path, src).unwrap();
+
+    let out = Command::new(smrc())
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to spawn smrc");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.code() == Some(1), "expected failure");
+    assert!(err.contains("nonexistent"), "missing undefined-var error: {}", err);
+    assert!(err.contains("bool"), "missing type-mismatch error: {}", err);
+    assert!(err.contains("2 errors"), "missing error count summary: {}", err);
+}

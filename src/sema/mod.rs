@@ -692,7 +692,16 @@ pub struct CheckedConst {
 
 // ─── Type Checker ─────────────────────────────────────────
 
-pub fn check(program: &Program) -> Result<CheckedProgram> {
+
+impl From<SemaError> for Vec<SemaError> {
+    fn from(e: SemaError) -> Self {
+        vec![e]
+    }
+}
+
+pub type CheckResult = std::result::Result<CheckedProgram, Vec<SemaError>>;
+
+pub fn check(program: &Program) -> CheckResult {
     let mut env = Env::new();
 
     // Pass 1: Register all top-level items
@@ -923,8 +932,9 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
         }
     }
 
+
     if !deferred_errors.is_empty() {
-        return Err(deferred_errors.remove(0));
+        return Err(deferred_errors);
     }
 
     Ok(CheckedProgram {

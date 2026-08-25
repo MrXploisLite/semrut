@@ -94,11 +94,19 @@ fn main() {
         return;
     }
 
-    // Phase 3: Semantic analysis + type checking
+    // Phase 3: Semantic analysis + type checking (reports every broken function)
     let checked = match sema::check(&ast) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}", e);
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("{} {}", "error:".red().bold(), e);
+            }
+            eprintln!(
+                "{} {} error{}",
+                "error:".red().bold(),
+                errors.len(),
+                if errors.len() == 1 { "" } else { "s" }
+            );
             std::process::exit(1);
         }
     };

@@ -270,11 +270,11 @@ Options:
 - [x] Source location tracking in error messages
 - [x] End-to-end test suite (compile → run → assert exit code / rejection)
 - [x] CLI validation (`--version`, `-O` range check)
+- [x] Multi-error reporting (every broken function reported in one pass,
+      with an error-count summary)
 
 ## Roadmap
 
-- [ ] Multi-error reporting (report every broken function in one pass; the
-      per-function collection exists in sema, output still stops at the first)
 - [ ] Trait bounds on generics (`<T: Printable>`)
 - [ ] Trait method resolution (dispatch to correct impl)
 - [ ] Comptime evaluation

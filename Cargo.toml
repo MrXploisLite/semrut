@@ -1,6 +1,6 @@
 [package]
 name = "semrut"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 description = "Assembly + Rust = SemRut. A systems programming language with hardware-level control and memory safety."
 
