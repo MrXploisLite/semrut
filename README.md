@@ -15,8 +15,11 @@ SemRut (smrc) is a systems programming language that combines the low-level cont
 
 ### Prerequisites
 
-- Rust toolchain (for building smrc)
-- LLVM 18 (`llc-18`, `clang`, `llvm-config`)
+- Rust toolchain (`rustup`, stable) for building smrc
+- LLVM 18 exactly: `llc-18` and `llvm-config` from the same version. smrc
+  generates IR through inkwell's `llvm18-1` bindings; linking against a newer
+  libLLVM produces IR that `llc-18` cannot parse (see `.cargo/config.toml`
+  for how this repo pins `LLVM_SYS_181_PREFIX` on Arch/CachyOS).
 
 ### Build the Compiler
 
@@ -27,6 +30,15 @@ cargo build --release
 ```
 
 The compiler binary is at `target/release/smrc`.
+
+### Run the Test Suite
+
+```bash
+cargo test --release
+```
+
+The e2e suite compiles snippets with smrc, runs the produced binaries, and
+asserts exit codes plus expected rejections from the borrow checker.
 
 ### Windows Setup
 
@@ -215,8 +227,9 @@ semrut/
 │   ├── mir/         # Mid-level IR
 │   ├── llvm/        # LLVM codegen (inkwell 0.8, LLVM 18)
 │   └── main.rs      # CLI entry point
-├── tests/           # Test programs
-└── examples/        # Example programs
+├── tests/           # .smr sample programs + Rust e2e suite (compiler_e2e.rs)
+├── examples/        # Example programs (valid and intentionally-invalid)
+└── .cargo/config.toml  # Pins llvm-sys to the LLVM 18 toolchain
 ```
 
 ## CLI Usage
@@ -231,7 +244,8 @@ Options:
   --dump-types          Print checked types and exit
   --dump-mir            Print MIR and exit
   --dump-llvm           Print LLVM IR and exit
-  -O <0-3>              Optimization level (default: 0)
+  -O <0-3>              Optimization level (default: 0, validated by the CLI)
+  -V, --version         Print version
 ```
 
 ## Implemented Features
@@ -254,9 +268,13 @@ Options:
 - [x] Undefined values (`let x: T = undefined`)
 - [x] References and dereferencing (`&mut`, `*`)
 - [x] Source location tracking in error messages
+- [x] End-to-end test suite (compile → run → assert exit code / rejection)
+- [x] CLI validation (`--version`, `-O` range check)
 
 ## Roadmap
 
+- [ ] Multi-error reporting (report every broken function in one pass; the
+      per-function collection exists in sema, output still stops at the first)
 - [ ] Trait bounds on generics (`<T: Printable>`)
 - [ ] Trait method resolution (dispatch to correct impl)
 - [ ] Comptime evaluation
