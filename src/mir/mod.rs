@@ -23,6 +23,8 @@ pub struct MirFunction {
     pub params: Vec<(String, MirType)>,
     pub ret_type: MirType,
     pub blocks: Vec<MirBlock>,
+    /// Kept for symbol visibility when the compiler grows multi-module support.
+    #[allow(dead_code)]
     pub is_pub: bool,
 }
 
@@ -868,45 +870,6 @@ fn build_remaining(
         id: current_id,
         stmts,
         terminator,
-    }
-}
-
-fn process_stmt(
-    stmt: &crate::sema::CheckedStmt,
-    stmts: &mut Vec<MirStmt>,
-    terminator: &mut MirTerminator,
-    all_blocks: &mut Vec<MirBlock>,
-    _current_id: &mut usize,
-    temp_counter: &mut usize,
-    ret_type: &MirType,
-    block_id: &mut usize,
-    structs: &[crate::sema::CheckedStruct],
-    loop_stack: &[(usize, usize)],
-) {
-    match stmt {
-        crate::sema::CheckedStmt::Let { name, ty: _, value, mutable: _ } => {
-            let (val, _) = build_expr(value, stmts, temp_counter, structs);
-            stmts.push(MirStmt::Assign { dest: name.clone(), value: val });
-        }
-        crate::sema::CheckedStmt::Return(value) => {
-            let mir_val = match value {
-                Some(e) => { let (v, _) = build_expr(e, stmts, temp_counter, structs); Some(v) }
-                None => None,
-            };
-            *terminator = MirTerminator::Return(mir_val);
-        }
-        crate::sema::CheckedStmt::Expr(expr, _) => {
-            let _ = build_expr(expr, stmts, temp_counter, structs);
-        }
-        crate::sema::CheckedStmt::If { .. } | crate::sema::CheckedStmt::While { .. } => {
-            // Nested control flow — simplified handling
-            let fake_id = 0;
-            build_block(
-                &crate::sema::CheckedBlock { stmts: vec![] },
-                all_blocks, fake_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack,
-            );
-        }
-        _ => {}
     }
 }
 

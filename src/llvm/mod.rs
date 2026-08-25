@@ -78,15 +78,6 @@ impl<'ctx> CodegenState<'ctx> {
         Ok(loaded)
     }
 
-    fn store_var(&self, name: &str, value: BasicValueEnum<'ctx>) -> Result<()> {
-        let (alloca, _) = self.allocas.get(name).ok_or_else(|| CodegenError::LlvmError {
-            msg: format!("undefined variable '{}'", name),
-        })?;
-        self.builder.build_store(*alloca, value)
-            .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
-        Ok(())
-    }
-
     fn create_var(&mut self, name: &str, value: BasicValueEnum<'ctx>) -> Result<()> {
         // If variable already exists, store to existing alloca
         if let Some((alloca, _)) = self.allocas.get(name) {
@@ -684,14 +675,12 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
                 })?;
 
             // Use build_struct_gep with opaque pointers (needs pointee type explicitly)
-            let field_ptr = unsafe {
-                state.builder.build_struct_gep(
-                    *struct_ty,
-                    *struct_ptr,
-                    *field_index,
-                    &format!("{}_gep", dest),
-                ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
-            };
+            let field_ptr = state.builder.build_struct_gep(
+                *struct_ty,
+                *struct_ptr,
+                *field_index,
+                &format!("{}_gep", dest),
+            ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
 
             // Load the field value
             let llvm_field_ty = mir_type_to_llvm_with_state(state, field_ty);
@@ -721,14 +710,12 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
                 *ptr
             };
 
-            let field_ptr = unsafe {
-                state.builder.build_struct_gep(
-                    struct_ty,
-                    struct_ptr,
-                    *field_index,
-                    &format!("{}_gep_{}", struct_var, field_index),
-                ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
-            };
+            let field_ptr = state.builder.build_struct_gep(
+                struct_ty,
+                struct_ptr,
+                *field_index,
+                &format!("{}_gep_{}", struct_var, field_index),
+            ).map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
 
             let val = resolve_value(state, value)?;
             state.builder.build_store(field_ptr, val)

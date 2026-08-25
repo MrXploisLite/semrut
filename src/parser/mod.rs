@@ -12,6 +12,9 @@ pub enum ParserError {
         pos: String,
     },
 
+    /// Part of the public error surface; parser currently reports EOF via
+    /// TypeMismatch, but callers pattern-match on this variant.
+    #[allow(dead_code)]
     #[error("unexpected end of file at {pos}")]
     UnexpectedEof { pos: String },
 }

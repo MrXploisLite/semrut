@@ -175,6 +175,7 @@ impl Ty {
 // ─── Environment / Scope ─────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields mirror source surface for diagnostics
 pub struct VarInfo {
     pub name: String,
     pub ty: Ty,
@@ -190,6 +191,7 @@ pub struct FnInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // type_params used when generic structs land
 pub struct StructInfo {
     pub name: String,
     pub type_params: Vec<String>,
@@ -203,6 +205,7 @@ pub struct EnumVariantInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // type_params used when generic enums land
 pub struct EnumInfo {
     pub name: String,
     pub type_params: Vec<String>,
@@ -210,6 +213,7 @@ pub struct EnumInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // trait infra: wired up with trait solving
 pub struct TraitInfo {
     pub name: String,
     pub type_params: Vec<String>,
@@ -374,10 +378,6 @@ impl Env {
         Ok(())
     }
 
-    fn lookup_trait(&self, name: &str) -> Option<TraitInfo> {
-        self.traits.get(name).cloned()
-    }
-
     fn add_const(&mut self, info: ConstInfo) -> Result<()> {
         if self.consts.contains_key(&info.name) {
             return Err(SemaError::DuplicateDef { name: info.name });
@@ -496,6 +496,7 @@ fn parse_builtin_type(name: &str) -> Option<Ty> {
 
 // ─── Checked Program ─────────────────────────────────────
 
+#[allow(dead_code)] // enums/consts flow to codegen in a later pass
 pub struct CheckedProgram {
     pub functions: Vec<CheckedFn>,
     pub structs: Vec<CheckedStruct>,
@@ -510,6 +511,7 @@ pub struct CheckedImpl {
     pub methods: Vec<CheckedFn>,
 }
 
+#[allow(dead_code)]
 pub struct CheckedFn {
     pub name: String,
     pub type_params: Vec<String>,
@@ -528,9 +530,12 @@ pub enum CheckedStmt {
         name: String,
         ty: Ty,
         value: Box<CheckedExpr>,
+        /// Used by the borrow checker once assignment tracking lands.
+        #[allow(dead_code)]
         mutable: bool,
     },
-    Expr(Box<CheckedExpr>, bool),
+    /// The bool records statement position for diagnostics.
+    Expr(Box<CheckedExpr>, #[allow(dead_code)] bool),
     Return(Option<Box<CheckedExpr>>),
     If {
         cond: Box<CheckedExpr>,
@@ -595,6 +600,8 @@ pub enum CheckedExpr {
     },
     MethodCall {
         receiver: Box<CheckedExpr>,
+        /// Original (unmangled) name, used in diagnostics.
+        #[allow(dead_code)]
         method: String,
         mangled: String,
         args: Vec<CheckedExpr>,
@@ -605,6 +612,7 @@ pub enum CheckedExpr {
         method: String,
         args: Vec<CheckedExpr>,
         result_ty: Ty,
+        #[allow(dead_code)]
         pos: String,
     },
     FieldAccess {
@@ -621,6 +629,7 @@ pub enum CheckedExpr {
         name: String,
         fields: Vec<(String, CheckedExpr)>,
         result_ty: Ty,
+        #[allow(dead_code)]
         pos: String,
     },
     Index {
@@ -633,6 +642,8 @@ pub enum CheckedExpr {
         outputs: Vec<(String, String)>,
         inputs: Vec<(String, String)>,
     },
+    /// Constructed once explicit `as` casts are checked separately.
+    #[allow(dead_code)]
     Cast {
         expr: Box<CheckedExpr>,
         target_ty: Ty,
@@ -666,11 +677,13 @@ pub struct CheckedStruct {
     pub fields: Vec<(String, Ty)>,
 }
 
+#[allow(dead_code)] // name/variants consumed by future enum lowering
 pub struct CheckedEnum {
     pub name: String,
     pub variants: Vec<EnumVariantInfo>,
 }
 
+#[allow(dead_code)] // consts not yet lowered to MIR
 pub struct CheckedConst {
     pub name: String,
     pub ty: Ty,
