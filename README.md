@@ -275,15 +275,21 @@ Options:
 
 ## Roadmap
 
-- [ ] Trait bounds on generics (`<T: Printable>`)
-- [ ] Trait method resolution (dispatch to correct impl)
-- [ ] Comptime evaluation
-- [ ] SIMD vector types (`vec128<f32>`, `vec256<i64>`)
-- [ ] Standard library expansion (String, Vec, HashMap)
-- [ ] Cross-compilation targets
-- [ ] Safe/pin/raw memory mode enforcement
-- [ ] Module system and imports
-- [ ] Error handling (`Result`, `?` operator)
+The full plan from 0.0.6 to 1.0.0 — performance ≥ C, safety ≥ Rust, and
+general-purpose coverage (OS, web, game, app, embedded) — lives in
+[ROADMAP.md](ROADMAP.md).
+
+Recently landed:
+
+- [x] Trait bounds on generics (`<T: Show>`) — parsed **and enforced**
+- [x] Real monomorphization of generic functions (`fn__i32`, `fn__i64`)
+- [x] Multi-error reporting (all broken functions reported in one run)
+
+Next up (v0.0.7):
+
+- [ ] Generic structs & enums
+- [ ] Static trait dispatch on bounds (`x.show()` where `T: Show`)
+- [ ] Source locations in error messages (file:line:col)
 
 ## License
 
