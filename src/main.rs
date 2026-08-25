@@ -15,7 +15,7 @@ use clap::Parser;
 use colored::Colorize;
 
 #[derive(Parser, Debug)]
-#[command(name = "smrc")]
+#[command(name = "smrc", version)]
 #[command(about = "SemRut Compiler — Assembly + Rust = SemRut")]
 struct Args {
     /// Input source file
@@ -46,7 +46,7 @@ struct Args {
     dump_llvm: bool,
 
     /// Optimization level (0-3)
-    #[arg(short = 'O', default_value = "0")]
+    #[arg(short = 'O', default_value = "0", value_parser = clap::value_parser!(u8).range(0..=3))]
     opt_level: u8,
 }
 

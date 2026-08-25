@@ -819,12 +819,14 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
         }
     }
 
-    // Pass 2: Check each item
+    // Pass 2: Check each item. Function-level errors are collected so the
+    // compiler reports every broken function in one run instead of one at a time.
     let mut functions = Vec::new();
     let mut structs = Vec::new();
     let mut enums = Vec::new();
     let mut consts = Vec::new();
     let mut impls = Vec::new();
+    let mut deferred_errors: Vec<SemaError> = Vec::new();
 
     for item in &program.items {
         match item {
@@ -833,19 +835,27 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                 env.type_params = fn_info.type_params.clone();
                 env.push_scope();
                 for (name, ty) in &fn_info.params {
-                    env.add_var(name.clone(), ty.clone(), true)?; // params are mutable by default in asm context
+                    if let Err(e) = env.add_var(name.clone(), ty.clone(), true) {
+                        deferred_errors.push(e);
+                        env.pop_scope();
+                        continue;
+                    }
                 }
-                let body = check_block(&mut env, &fn_item.body, &fn_info.ret_type)?;
+                match check_block(&mut env, &fn_item.body, &fn_info.ret_type) {
+                    Ok(body) => {
+                        functions.push(CheckedFn {
+                            name: fn_item.name.clone(),
+                            type_params: fn_info.type_params.clone(),
+                            params: fn_info.params.clone(),
+                            ret_type: fn_info.ret_type.clone(),
+                            body,
+                            is_pub: fn_item.is_pub,
+                        });
+                    }
+                    Err(e) => deferred_errors.push(e),
+                }
                 env.pop_scope();
                 env.type_params.clear();
-                functions.push(CheckedFn {
-                    name: fn_item.name.clone(),
-                    type_params: fn_info.type_params.clone(),
-                    params: fn_info.params,
-                    ret_type: fn_info.ret_type,
-                    body,
-                    is_pub: fn_item.is_pub,
-                });
             }
             Item::Struct(s_item) => {
                 let info = env.lookup_struct(&s_item.name).unwrap();
@@ -911,6 +921,10 @@ pub fn check(program: &Program) -> Result<CheckedProgram> {
                 // Traits are already registered in Pass 1
             }
         }
+    }
+
+    if !deferred_errors.is_empty() {
+        return Err(deferred_errors.remove(0));
     }
 
     Ok(CheckedProgram {
