@@ -1,0 +1,5 @@
+# Pin llvm-sys to the LLVM 18 toolchain (matches inkwell's llvm18-1 feature).
+# Without this, llvm-sys may link against a newer system libLLVM, producing IR
+# (nuw/nsw GEP flags) that llc-18 then rejects at emit time.
+[env]
+LLVM_SYS_181_PREFIX = "/usr/lib/llvm18"
