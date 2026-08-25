@@ -143,7 +143,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_type_params(&mut self) -> Result<Vec<String>> {
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>> {
         if !matches_kind(&self.peek().kind, "Lt") {
             return Ok(Vec::new());
         }
@@ -163,19 +163,25 @@ impl<'a> Parser<'a> {
                         });
                     }
                 };
-                params.push(name);
 
-                // Trait bounds (`<T: Show, U>`) are parsed and discarded for now:
-                // bounds checking lands with trait method resolution.
+                // Trait bounds (`<T: Show, U>`): kept for sema enforcement.
+                let mut bounds = Vec::new();
                 if matches_kind(&self.peek().kind, "Colon") {
                     self.advance(); // consume ':'
-                    // bound list: TraitName (+ TraitName)*
-                    self.expect("Ident")?;
+                    let b = self.expect("Ident")?;
+                    if let crate::lexer::TokenKind::Ident(bname) = &b.kind {
+                        bounds.push(bname.clone());
+                    }
                     while matches_kind(&self.peek().kind, "Plus") {
                         self.advance(); // consume '+'
-                        self.expect("Ident")?;
+                        let b = self.expect("Ident")?;
+                        if let crate::lexer::TokenKind::Ident(bname) = &b.kind {
+                            bounds.push(bname.clone());
+                        }
                     }
                 }
+
+                params.push(TypeParam { name, bounds });
 
                 if matches_kind(&self.peek().kind, "Comma") {
                     self.advance();
@@ -1050,7 +1056,7 @@ impl<'a> Parser<'a> {
         }
         self.expect("RBrace")?;
 
-        Ok(Item::Struct(StructItem { name, type_params, fields }))
+        Ok(Item::Struct(StructItem { name, type_params: type_params.into_iter().map(|tp| tp.name).collect(), fields }))
     }
 
     fn parse_enum_item(&mut self, _is_pub: bool) -> Result<Item> {
@@ -1110,7 +1116,7 @@ impl<'a> Parser<'a> {
         }
         self.expect("RBrace")?;
 
-        Ok(Item::Enum(EnumItem { name, type_params, variants }))
+        Ok(Item::Enum(EnumItem { name, type_params: type_params.into_iter().map(|tp| tp.name).collect(), variants }))
     }
 
     fn parse_const_item(&mut self, _is_pub: bool) -> Result<Item> {
@@ -1248,7 +1254,7 @@ impl<'a> Parser<'a> {
 
         self.expect("RBrace")?;
 
-        Ok(Item::Impl(ImplItem { trait_name, target_type, type_params, methods }))
+        Ok(Item::Impl(ImplItem { trait_name, target_type, type_params: type_params.into_iter().map(|tp| tp.name).collect(), methods }))
     }
 
     fn parse_trait_item(&mut self) -> Result<Item> {
@@ -1342,7 +1348,7 @@ impl<'a> Parser<'a> {
 
         self.expect("RBrace")?;
 
-        Ok(Item::Trait(TraitItem { name, type_params, methods }))
+        Ok(Item::Trait(TraitItem { name, type_params: type_params.into_iter().map(|tp| tp.name).collect(), methods }))
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern> {

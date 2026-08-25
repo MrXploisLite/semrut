@@ -228,3 +228,61 @@ fn bad_two() -> i32 {
     assert!(err.contains("bool"), "missing type-mismatch error: {}", err);
     assert!(err.contains("2 errors"), "missing error count summary: {}", err);
 }
+
+#[test]
+fn trait_bound_satisfied_impl() {
+    let src = r#"
+trait Show {
+    fn show(self: i32);
+}
+
+struct Point {
+    x: i32,
+}
+
+impl Show for Point {
+    fn show(self: i32) {
+    }
+}
+
+fn display<T: Show>(x: T) -> T {
+    return x;
+}
+
+pub fn main() -> i32 {
+    let p = Point { x: 40 };
+    let q = display(p);
+    return q.x + 2;
+}
+"#;
+    let bin = compile_ok("bound_ok", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
+
+#[test]
+fn trait_bound_violation_rejected() {
+    let src = r#"
+trait Show {
+    fn show(self: i32);
+}
+
+struct Naked {
+    y: i32,
+}
+
+fn display<T: Show>(x: T) -> T {
+    return x;
+}
+
+pub fn main() -> i32 {
+    let n = display(Naked { y: 1 });
+    return 0;
+}
+"#;
+    let err = compile_err("bound_bad", src);
+    assert!(
+        err.contains("does not implement trait"),
+        "expected trait-bound violation, got: {}",
+        err
+    );
+}

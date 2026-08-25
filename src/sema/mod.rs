@@ -186,6 +186,10 @@ pub struct VarInfo {
 pub struct FnInfo {
     pub name: String,
     pub type_params: Vec<String>,
+    /// Trait bounds per type parameter, parallel to `type_params`.
+    /// Empty inner vec = unbounded. Used for bound checking at call sites.
+    #[allow(dead_code)] // enforced at generic call sites (bound check)
+    pub trait_bounds: Vec<Vec<String>>,
     pub params: Vec<(String, Ty)>,
     pub ret_type: Ty,
 }
@@ -263,30 +267,35 @@ impl Env {
         env.functions.insert("print".to_string(), FnInfo {
             name: "print".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![("fmt".to_string(), Ty::Str)],
             ret_type: Ty::Void,
         });
         env.functions.insert("print_int".to_string(), FnInfo {
             name: "print_int".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![("n".to_string(), Ty::I64)],
             ret_type: Ty::Void,
         });
         env.functions.insert("alloc".to_string(), FnInfo {
             name: "alloc".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![("size".to_string(), Ty::U64)],
             ret_type: Ty::Ptr(Box::new(Ty::U8)),
         });
         env.functions.insert("free".to_string(), FnInfo {
             name: "free".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![("ptr".to_string(), Ty::Ptr(Box::new(Ty::U8)))],
             ret_type: Ty::Void,
         });
         env.functions.insert("memcpy".to_string(), FnInfo {
             name: "memcpy".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![
                 ("dst".to_string(), Ty::Ptr(Box::new(Ty::U8))),
                 ("src".to_string(), Ty::Ptr(Box::new(Ty::U8))),
@@ -297,6 +306,7 @@ impl Env {
         env.functions.insert("memset".to_string(), FnInfo {
             name: "memset".to_string(),
             type_params: Vec::new(),
+            trait_bounds: Vec::new(),
             params: vec![
                 ("dst".to_string(), Ty::Ptr(Box::new(Ty::U8))),
                 ("c".to_string(), Ty::I32),
@@ -441,6 +451,29 @@ impl Env {
                 Ok(Ty::Generic(name.clone(), resolved_args))
             }
         }
+    }
+
+    /// Does `ty` implement `trait_name`? Looks for a registered impl method
+    /// mangled as "TraitName::TypeName". Trait impls register their methods
+    /// that way in Pass 1, so this is the authoritative impl table.
+    fn type_impls_trait(&self, ty: &Ty, trait_name: &str) -> bool {
+        let ty_name = match ty {
+            Ty::Struct(n) | Ty::Enum(n) => n.clone(),
+            Ty::I8 => "i8".to_string(),
+            Ty::I16 => "i16".to_string(),
+            Ty::I32 => "i32".to_string(),
+            Ty::I64 => "i64".to_string(),
+            Ty::U8 => "u8".to_string(),
+            Ty::U16 => "u16".to_string(),
+            Ty::U32 => "u32".to_string(),
+            Ty::U64 => "u64".to_string(),
+            Ty::F32 => "f32".to_string(),
+            Ty::F64 => "f64".to_string(),
+            Ty::Bool => "bool".to_string(),
+            Ty::Char => "char".to_string(),
+            _ => return false,
+        };
+        self.lookup_fn(&format!("{}::{}", trait_name, ty_name)).is_some()
     }
 
     // Resolve type with substitution map for monomorphization
@@ -941,7 +974,7 @@ pub fn check(program: &Program) -> CheckResult {
         match item {
             Item::Fn(fn_item) => {
                 // Set type params for resolution
-                env.type_params = fn_item.type_params.clone();
+                env.type_params = fn_item.type_params.iter().map(|tp| tp.name.clone()).collect();
                 let params: Vec<(String, Ty)> = fn_item.params.iter()
                     .map(|p| env.resolve_type(&p.ty).map(|ty| (p.name.clone(), ty)))
                     .collect::<Result<Vec<_>>>()?;
@@ -952,7 +985,8 @@ pub fn check(program: &Program) -> CheckResult {
                 env.type_params.clear();
                 env.add_fn(FnInfo {
                     name: fn_item.name.clone(),
-                    type_params: fn_item.type_params.clone(),
+                    type_params: fn_item.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                        trait_bounds: fn_item.type_params.iter().map(|tp| tp.bounds.clone()).collect(),
                     params: params.clone(),
                     ret_type: ret_type.clone(),
                 })?;
@@ -1012,6 +1046,7 @@ pub fn check(program: &Program) -> CheckResult {
                         Ok(FnInfo {
                             name: m.name.clone(),
                             type_params: Vec::new(),
+                            trait_bounds: Vec::new(),
                             params,
                             ret_type,
                         })
@@ -1040,8 +1075,24 @@ pub fn check(program: &Program) -> CheckResult {
                         Some(t) => env.resolve_type(t)?,
                         None => Ty::Void,
                     };
-                    // For trait impls: mangle as TraitName::method
+                    // For trait impls, register TWO entries in Pass 1:
+                    //   "Trait::Type"    -> impl-table marker for bound checks
+                    //   "Trait::method"  -> method body entry (Pass 2 looks this up)
+                    //   (the trait declaration already registered the signature;
+                    //    overwrite it with the impl's concrete signature)
                     // For inherent impls: mangle as TypeName::method
+                    if let Some(ref trait_name) = impl_item.trait_name {
+                        env.functions.insert(
+                            format!("{}::{}", trait_name, target_ty),
+                            FnInfo {
+                                name: String::new(),
+                                type_params: Vec::new(),
+                                trait_bounds: Vec::new(),
+                                params: Vec::new(),
+                                ret_type: Ty::Void,
+                            },
+                        );
+                    }
                     let mangled = if let Some(ref trait_name) = impl_item.trait_name {
                         format!("{}::{}", trait_name, method.name)
                     } else {
@@ -1050,6 +1101,7 @@ pub fn check(program: &Program) -> CheckResult {
                     env.add_fn(FnInfo {
                         name: mangled,
                         type_params: impl_item.type_params.clone(),
+                        trait_bounds: Vec::new(),
                         params,
                         ret_type,
                     })?;
@@ -1124,8 +1176,8 @@ pub fn check(program: &Program) -> CheckResult {
                 let target_ty = env.resolve_type(&impl_item.target_type)?;
                 let mut checked_methods = Vec::new();
                 for method in &impl_item.methods {
-                    // For trait impls: mangle as TraitName::method
-                    // For inherent impls: mangle as TypeName::method
+                    // Pass 1 registered trait impls as "Trait::Type" (impl table)
+                    // and the method body under "Trait::method" / "Type::method".
                     let mangled = if let Some(ref trait_name) = impl_item.trait_name {
                         format!("{}::{}", trait_name, method.name)
                     } else {
@@ -1480,6 +1532,7 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                             Ty::Fn(params, ret) => FnInfo {
                                 name: name.clone(),
                                 type_params: Vec::new(),
+                                trait_bounds: Vec::new(),
                                 params: params.iter().enumerate()
                                     .map(|(i, ty)| (format!("arg{}", i), ty.clone()))
                                     .collect(),
@@ -1533,6 +1586,23 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                 // the concrete value comes from the coerced literal.
                 for tp in &fn_info.type_params.clone() {
                     subst.entry(tp.clone()).or_insert(Ty::I32);
+                }
+
+                // Enforce declared trait bounds: every concrete type substituted
+                // for a bounded param must implement each bound trait.
+                for (idx, tp) in fn_info.type_params.iter().enumerate() {
+                    let Some(concrete) = subst.get(tp) else { continue };
+                    let Some(bounds) = fn_info.trait_bounds.get(idx) else { continue };
+                    for b in bounds {
+                        if !env.type_impls_trait(concrete, b) {
+                            return Err(SemaError::Other {
+                                msg: format!(
+                                    "`{}` does not implement trait `{}` (required by `{}` bound)",
+                                    concrete, b, tp
+                                ),
+                            });
+                        }
+                    }
                 }
 
                 // Check that all type parameters were inferred

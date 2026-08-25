@@ -35,9 +35,17 @@ pub struct ImplItem {
 }
 
 #[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: String,
+    /// Trait names this parameter must implement (`T: Show + Clone`).
+    pub bounds: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnItem {
     pub name: String,
-    pub type_params: Vec<String>,  // <T, U>
+    /// Generic params with their declared trait bounds (<T: Show>, plain <U> = no bounds).
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret_type: Option<Type>,
     pub body: Block,
