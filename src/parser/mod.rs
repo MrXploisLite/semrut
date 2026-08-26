@@ -25,13 +25,20 @@ pub use ast::*;
 
 /// Simple recursive descent parser (handwritten for now, LALRPOP later)
 pub fn parse(tokens: &[Token], _filename: &str) -> Result<Program> {
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        no_struct_literal: false,
+    };
     p.parse_program()
 }
 
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// While parsing a match scrutinee, `{` opens the match body, never a
+    /// struct literal. This flag suppresses struct-literal parsing there.
+    no_struct_literal: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -807,6 +814,10 @@ impl<'a> Parser<'a> {
                         Expr::Var(name) => name.clone(),
                         _ => break,
                     };
+                    // A match scrutinee's `{` belongs to the match body.
+                    if self.no_struct_literal {
+                        break;
+                    }
                     // Peek ahead: if } or ident: then struct literal, else break
                     let is_struct = self.pos + 1 < self.tokens.len()
                         && (matches_kind(&self.tokens[self.pos + 1].kind, "RBrace")
@@ -898,7 +909,11 @@ impl<'a> Parser<'a> {
             }
             crate::lexer::TokenKind::Match => {
                 self.advance();
-                let scrutinee = self.parse_expr()?;
+                let prev_no_struct = self.no_struct_literal;
+                self.no_struct_literal = true;
+                let scrutinee = self.parse_expr();
+                self.no_struct_literal = prev_no_struct;
+                let scrutinee = scrutinee?;
                 self.expect("LBrace")?;
                 let mut arms = Vec::new();
                 while !matches_kind(&self.peek().kind, "RBrace") {

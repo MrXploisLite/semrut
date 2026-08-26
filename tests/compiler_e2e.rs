@@ -341,3 +341,73 @@ pub fn main() -> i32 {
     let bin = compile_ok("generic_sig", src);
     assert_eq!(run_exit_code(&bin), 42);
 }
+
+#[test]
+fn generic_struct_inferred() {
+    let src = r#"
+struct Box<T> {
+    value: T,
+}
+
+pub fn main() -> i32 {
+    let b = Box { value: 42 };
+    return b.value;
+}
+"#;
+    let bin = compile_ok("generic_struct_inferred", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
+
+#[test]
+fn enum_match_unit_variants() {
+    let src = r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+pub fn main() -> i32 {
+    let c = Color::Red;
+    return match c {
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Blue => 3,
+    };
+}
+"#;
+    let bin = compile_ok("enum_match", src);
+    assert_eq!(run_exit_code(&bin), 1);
+}
+
+#[test]
+fn generic_fn_inferred_i32() {
+    let src = r#"
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+pub fn main() -> i32 {
+    let n: i32 = id(42);
+    return n;
+}
+"#;
+    let bin = compile_ok("generic_fn_i32", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
+
+#[test]
+fn generic_fn_inferred_i64() {
+    let src = r#"
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+pub fn main() -> i64 {
+    let n: i64 = id(42);
+    return n;
+}
+"#;
+    let bin = compile_ok("generic_fn_i64", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}

@@ -45,6 +45,8 @@ struct CodegenState<'ctx> {
     llvm_blocks: HashMap<usize, BasicBlock<'ctx>>,
     /// Cached LLVM struct types by name
     struct_types: HashMap<String, inkwell::types::StructType<'ctx>>,
+    /// Enum variant names per enum, for discriminant-based matching
+    enum_variants: HashMap<String, Vec<String>>,
 }
 
 impl<'ctx> CodegenState<'ctx> {
@@ -57,6 +59,7 @@ impl<'ctx> CodegenState<'ctx> {
             functions: HashMap::new(),
             llvm_blocks: HashMap::new(),
             struct_types: HashMap::new(),
+            enum_variants: HashMap::new(),
         }
     }
 
@@ -568,11 +571,18 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
         MirStmt::Match { dest, scrutinee, arms } => {
             let scrut_val = resolve_value(state, scrutinee)?;
 
-            // Allocate result variable
-            let result_ty = match scrut_val {
-                BasicValueEnum::IntValue(v) => v.get_type(),
-                _ => state.context.i64_type(),
-            };
+            // The result type comes from what the arms produce, not from the
+            // scrutinee: matching an i64 enum tag can still yield an i32.
+            let result_ty = arms
+                .iter()
+                .find_map(|arm| match resolve_value(state, &arm.body_result) {
+                    Ok(BasicValueEnum::IntValue(v)) => Some(v.get_type()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| match scrut_val {
+                    BasicValueEnum::IntValue(v) => v.get_type(),
+                    _ => state.context.i64_type(),
+                });
             let result_alloca = state.builder.build_alloca(result_ty, &format!("{}_result", dest))
                 .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?;
 
@@ -588,10 +598,26 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
                 arm_blocks.push(state.context.append_basic_block(current_fn, &format!("match_arm_{}", i)));
             }
 
-            // For enum matching, use discriminant-based switch
-            // For now, treat scrutinee as an integer discriminant
+            // For enum matching, use discriminant-based switch.
+            // Cast scrutinee to result type so case constants & alloca match.
             let scrut_int = match scrut_val {
-                BasicValueEnum::IntValue(v) => v,
+                BasicValueEnum::IntValue(v) => {
+                    let target_wide = result_ty.get_bit_width();
+                    let src_wide = v.get_type().get_bit_width();
+                    if src_wide < target_wide {
+                        state
+                            .builder
+                            .build_int_s_extend(v, result_ty, "scrut_sext")
+                            .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
+                    } else if src_wide > target_wide {
+                        state
+                            .builder
+                            .build_int_truncate(v, result_ty, "scrut_trunc")
+                            .map_err(|e| CodegenError::LlvmError { msg: e.to_string() })?
+                    } else {
+                        v
+                    }
+                }
                 _ => {
                     return Err(CodegenError::LlvmError {
                         msg: "match scrutinee must be integer (enum discriminant)".to_string(),
@@ -599,24 +625,31 @@ fn compile_stmt<'ctx>(state: &mut CodegenState<'ctx>, stmt: &MirStmt) -> Result<
                 }
             };
 
-            // Build switch: each arm with a literal pattern becomes a switch case
+            // Build switch: each arm with a literal pattern becomes a switch case.
+            // Case constants must share the scrutinee's type, which can differ
+            // from the arms' result type (i64 enum tag vs i32 body).
+            let case_ty = scrut_int.get_type();
             let mut cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
             let mut default_block: Option<inkwell::basic_block::BasicBlock<'ctx>> = None;
 
             for (i, arm) in arms.iter().enumerate() {
                 match &arm.pattern {
                     MirPattern::Literal { value } => {
-                        let case_val = result_ty.const_int(*value as u64, true);
+                        let case_val = case_ty.const_int(*value as u64, true);
                         cases.push((case_val, arm_blocks[i]));
                     }
                     MirPattern::Wildcard => {
                         default_block = Some(arm_blocks[i]);
                     }
-                    MirPattern::EnumVariant { variant: _, .. } => {
-                        // For enum variants, we'd need discriminant info
-                        // For now, treat as sequential (0, 1, 2, ...)
-                        let idx = i as u64;
-                        let case_val = result_ty.const_int(idx, true);
+                    MirPattern::EnumVariant { enum_name, variant, .. } => {
+                        // Discriminant is the variant's declaration order, which
+                        // is what PathAccess lowering emits for a unit variant.
+                        let idx = state
+                            .enum_variants
+                            .get(enum_name)
+                            .and_then(|vs| vs.iter().position(|v| v == variant))
+                            .unwrap_or(i) as u64;
+                        let case_val = case_ty.const_int(idx, true);
                         cases.push((case_val, arm_blocks[i]));
                     }
                     MirPattern::Binding { name: _ } => {

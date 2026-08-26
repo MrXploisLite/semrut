@@ -1815,12 +1815,22 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
         }
 
         Expr::PathAccess { type_name, name } => {
-            // Could be a const, enum variant, etc. For now, treat as unknown.
-            // TODO: resolve properly
+            // Unit enum variant (`Color::Red`): resolve to the enum type so
+            // match arms and codegen see a real enum value.
+            if let Some(enum_info) = env.lookup_enum(type_name) {
+                if enum_info.variants.iter().any(|v| v.name == *name) {
+                    return Ok(CheckedExpr::PathAccess {
+                        type_name: type_name.clone(),
+                        name: name.clone(),
+                        result_ty: Ty::Enum(type_name.clone()),
+                    });
+                }
+            }
+            // Associated const or other path: type not yet tracked.
             Ok(CheckedExpr::PathAccess {
                 type_name: type_name.clone(),
                 name: name.clone(),
-                result_ty: Ty::I64, // placeholder
+                result_ty: Ty::I64,
             })
         }
 

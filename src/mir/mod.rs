@@ -9,6 +9,13 @@ use std::fmt;
 pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     pub structs: Vec<MirStruct>,
+    pub enums: Vec<MirEnum>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MirEnum {
+    pub name: String,
+    pub variants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,9 +348,10 @@ fn sema_ty_to_mir(ty: &Ty) -> MirType {
 pub fn build(program: &CheckedProgram) -> MirProgram {
     let mut functions = Vec::new();
     let structs = &program.structs;
+    let enums = &program.enums;
 
     for func in &program.functions {
-        let mir_func = build_function(func, structs);
+        let mir_func = build_function(func, structs, enums);
         functions.push(mir_func);
     }
 
@@ -355,7 +363,7 @@ pub fn build(program: &CheckedProgram) -> MirProgram {
             format!("{}", impl_item.target_type)
         };
         for method in &impl_item.methods {
-            let mut mir_func = build_function(method, structs);
+            let mut mir_func = build_function(method, structs, enums);
             // Mangle name: TraitName_method or TypeName_method
             mir_func.name = format!("{}_{}", mangle_prefix, method.name);
             functions.push(mir_func);
@@ -368,10 +376,18 @@ pub fn build(program: &CheckedProgram) -> MirProgram {
             name: s.name.clone(),
             fields: s.fields.iter().map(|(n, t)| (n.clone(), sema_ty_to_mir(t))).collect(),
         }).collect(),
+        enums: enums.iter().map(|e| MirEnum {
+            name: e.name.clone(),
+            variants: e.variants.iter().map(|v| v.name.clone()).collect(),
+        }).collect(),
     }
 }
 
-fn build_function(func: &CheckedFn, structs: &[crate::sema::CheckedStruct]) -> MirFunction {
+fn build_function(
+    func: &CheckedFn,
+    structs: &[crate::sema::CheckedStruct],
+    enums: &[crate::sema::CheckedEnum],
+) -> MirFunction {
     let mut blocks = Vec::new();
     let mut block_id = 0;
     let mut temp_counter = 0;
@@ -383,7 +399,7 @@ fn build_function(func: &CheckedFn, structs: &[crate::sema::CheckedStruct]) -> M
     let ret_type = sema_ty_to_mir(&func.ret_type);
 
     // Build entry block (ID 0)
-    build_block(&func.body, &mut blocks, 0, &mut block_id, &mut temp_counter, ret_type.clone(), structs, &[]);
+    build_block(&func.body, &mut blocks, 0, &mut block_id, &mut temp_counter, ret_type.clone(), structs, enums, &[]);
 
     MirFunction {
         name: func.name.clone(),
@@ -402,6 +418,7 @@ fn build_block(
     temp_counter: &mut usize,
     ret_type: MirType,
     structs: &[crate::sema::CheckedStruct],
+    enums: &[crate::sema::CheckedEnum],
     loop_stack: &[(usize, usize)],
 ) {
     let mut stmts = Vec::new();
@@ -412,7 +429,7 @@ fn build_block(
         let stmt = &block.stmts[i];
         match stmt {
             crate::sema::CheckedStmt::Let { name, ty, value, mutable: _ } => {
-                let (val, val_ty) = build_expr(value, &mut stmts, temp_counter, structs);
+                let (val, val_ty) = build_expr(value, &mut stmts, temp_counter, structs, enums);
                 let mir_ty = sema_ty_to_mir(ty);
                 // Use declared type if value is undefined/never
                 let mut final_val = if matches!(val_ty, MirType::Void) {
@@ -449,7 +466,7 @@ fn build_block(
             }
 
             crate::sema::CheckedStmt::Expr(expr, _) => {
-                let (val, _) = build_expr(expr, &mut stmts, temp_counter, structs);
+                let (val, _) = build_expr(expr, &mut stmts, temp_counter, structs, enums);
                 // If this is the last statement and function has non-void return type, auto-return
                 if i + 1 == block.stmts.len() && !matches!(ret_type, MirType::Void) {
                     terminator = MirTerminator::Return(Some(val));
@@ -461,8 +478,17 @@ fn build_block(
             crate::sema::CheckedStmt::Return(value) => {
                 let mir_val = match value {
                     Some(e) => {
-                        let (val, _) = build_expr(e, &mut stmts, temp_counter, structs);
-                        Some(val)
+                        let (val, val_ty) = build_expr(e, &mut stmts, temp_counter, structs, enums);
+                        // Narrow/widen so the returned value matches the
+                        // function's declared result type (enum tags are i64,
+                        // but a function may return i32).
+                        Some(coerce_int_width(
+                            val,
+                            &val_ty,
+                            &ret_type,
+                            &mut stmts,
+                            temp_counter,
+                        ))
                     }
                     None => None,
                 };
@@ -471,7 +497,7 @@ fn build_block(
             }
 
             crate::sema::CheckedStmt::If { cond, then_block, else_block } => {
-                let (cond_val, _) = build_expr(cond, &mut stmts, temp_counter, structs);
+                let (cond_val, _) = build_expr(cond, &mut stmts, temp_counter, structs, enums);
 
                 let then_id = *block_id + 1;
                 let has_else = else_block.is_some();
@@ -486,7 +512,8 @@ fn build_block(
                 };
 
                 // Build then block
-                build_block(then_block, all_blocks, then_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                build_block(then_block, all_blocks, then_id, block_id, temp_counter, ret_type.clone(), structs, enums,
+                    loop_stack);
                 // Patch: add jump to merge at end of then block (only preserve explicit return with value)
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == then_id) {
                     match &b.terminator {
@@ -497,7 +524,8 @@ fn build_block(
 
                 // Build else block if exists
                 if let Some(b) = else_block {
-                    build_block(b, all_blocks, else_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                    build_block(b, all_blocks, else_id, block_id, temp_counter, ret_type.clone(), structs, enums,
+                    loop_stack);
                     if let Some(bb) = all_blocks.iter_mut().find(|bb| bb.id == else_id) {
                         match &bb.terminator {
                             MirTerminator::Return(Some(_)) => {} // keep explicit return
@@ -526,7 +554,7 @@ fn build_block(
                 }
 
                 // Remaining statements go into merge block
-                let merge_block = build_remaining(&remaining, merge_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                let merge_block = build_remaining(&remaining, merge_id, block_id, temp_counter, ret_type.clone(), structs, enums, loop_stack);
                 all_blocks.push(merge_block);
 
                 // Push current block before returning
@@ -549,7 +577,7 @@ fn build_block(
 
                 // Header block: evaluate cond, branch to body or exit
                 let mut header_stmts = Vec::new();
-                let (cond_val, _) = build_expr(cond, &mut header_stmts, temp_counter, structs);
+                let (cond_val, _) = build_expr(cond, &mut header_stmts, temp_counter, structs, enums);
                 header_stmts.push(MirStmt::Assign { dest: format!("_while_cond_{}", header_id), value: cond_val });
                 all_blocks.push(MirBlock {
                     id: header_id,
@@ -564,7 +592,8 @@ fn build_block(
                 // Body block — push loop context so break/continue work
                 let mut inner_stack = loop_stack.to_vec();
                 inner_stack.push((header_id, exit_id));
-                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, enums,
+                    &inner_stack);
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
                     let already_set = matches!(&b.terminator,
                         MirTerminator::Jump { target } if *target != header_id
@@ -576,7 +605,7 @@ fn build_block(
 
                 // Remaining statements go into exit block
                 let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
-                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, enums, loop_stack);
                 all_blocks.push(exit_block);
 
                 // Push current block before returning
@@ -597,7 +626,8 @@ fn build_block(
 
                 let mut inner_stack = loop_stack.to_vec();
                 inner_stack.push((body_id, exit_id));
-                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, enums,
+                    &inner_stack);
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
                     let is_exit = matches!(&b.terminator, MirTerminator::Jump { target } if *target != body_id);
                     if !is_exit {
@@ -606,7 +636,7 @@ fn build_block(
                 }
 
                 let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
-                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, enums, loop_stack);
                 all_blocks.push(exit_block);
 
                 // Push current block
@@ -627,13 +657,13 @@ fn build_block(
                 *block_id = exit_id;
 
                 // Current block: i = start
-                let (start_val, _) = build_expr(start, &mut stmts, temp_counter, structs);
+                let (start_val, _) = build_expr(start, &mut stmts, temp_counter, structs, enums);
                 stmts.push(MirStmt::Assign { dest: var.clone(), value: start_val });
                 terminator = MirTerminator::Jump { target: header_id };
 
                 // Header block: i < end?
                 let mut header_stmts = Vec::new();
-                let (end_val, _) = build_expr(end, &mut header_stmts, temp_counter, structs);
+                let (end_val, _) = build_expr(end, &mut header_stmts, temp_counter, structs, enums);
                 let cond_name = format!("_for_cond_{}", header_id);
                 header_stmts.push(MirStmt::Assign {
                     dest: cond_name.clone(),
@@ -665,7 +695,8 @@ fn build_block(
                 // Body block with loop context for break/continue
                 let mut inner_stack = loop_stack.to_vec();
                 inner_stack.push((header_id, exit_id));
-                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, &inner_stack);
+                build_block(body, all_blocks, body_id, block_id, temp_counter, MirType::Void, structs, enums,
+                    &inner_stack);
                 // At end of body, i = i + 1 and jump to header
                 if let Some(b) = all_blocks.iter_mut().find(|b| b.id == body_id) {
                     let needs_inc = matches!(&b.terminator,
@@ -690,7 +721,7 @@ fn build_block(
 
                 // Remaining statements in exit block
                 let remaining: Vec<_> = block.stmts[i+1..].iter().collect();
-                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                let exit_block = build_remaining(&remaining, exit_id, block_id, temp_counter, ret_type.clone(), structs, enums, loop_stack);
                 all_blocks.push(exit_block);
 
                 all_blocks.push(MirBlock {
@@ -706,16 +737,16 @@ fn build_block(
                 for inner_stmt in &inner.stmts {
                     match inner_stmt {
                         crate::sema::CheckedStmt::Let { name, ty: _, value, mutable: _ } => {
-                            let (val, _) = build_expr(value, &mut stmts, temp_counter, structs);
+                            let (val, _) = build_expr(value, &mut stmts, temp_counter, structs, enums);
                             stmts.push(MirStmt::Assign { dest: name.clone(), value: val });
                         }
                         crate::sema::CheckedStmt::Expr(expr, _) => {
-                            let _ = build_expr(expr, &mut stmts, temp_counter, structs);
+                            let _ = build_expr(expr, &mut stmts, temp_counter, structs, enums);
                         }
                         crate::sema::CheckedStmt::Return(value) => {
                             let mir_val = match value {
                                 Some(e) => {
-                                    let (val, _) = build_expr(e, &mut stmts, temp_counter, structs);
+                                    let (val, _) = build_expr(e, &mut stmts, temp_counter, structs, enums);
                                     Some(val)
                                 }
                                 None => None,
@@ -745,12 +776,12 @@ fn build_block(
                 for inner_stmt in &ublock.stmts {
                     match inner_stmt {
                         crate::sema::CheckedStmt::Expr(expr, _) => {
-                            let _ = build_expr(expr, &mut stmts, temp_counter, structs);
+                            let _ = build_expr(expr, &mut stmts, temp_counter, structs, enums);
                         }
                         crate::sema::CheckedStmt::Return(value) => {
                             let mir_val = match value {
                                 Some(e) => {
-                                    let (val, _) = build_expr(e, &mut stmts, temp_counter, structs);
+                                    let (val, _) = build_expr(e, &mut stmts, temp_counter, structs, enums);
                                     Some(val)
                                 }
                                 None => None,
@@ -807,6 +838,7 @@ fn build_remaining(
     temp_counter: &mut usize,
     ret_type: MirType,
     structs: &[crate::sema::CheckedStruct],
+    enums: &[crate::sema::CheckedEnum],
     loop_stack: &[(usize, usize)],
 ) -> MirBlock {
     let mut stmts = Vec::new();
@@ -817,11 +849,11 @@ fn build_remaining(
         let stmt = remaining[i];
         match stmt {
             crate::sema::CheckedStmt::Let { name, ty: _, value, mutable: _ } => {
-                let (val, _) = build_expr(value, &mut stmts, temp_counter, structs);
+                let (val, _) = build_expr(value, &mut stmts, temp_counter, structs, enums);
                 stmts.push(MirStmt::Assign { dest: name.clone(), value: val });
             }
             crate::sema::CheckedStmt::Expr(expr, _) => {
-                let (val, _) = build_expr(expr, &mut stmts, temp_counter, structs);
+                let (val, _) = build_expr(expr, &mut stmts, temp_counter, structs, enums);
                 // If this is the last statement and function has non-void return type, auto-return
                 if i + 1 == remaining.len() && !matches!(ret_type, MirType::Void) {
                     terminator = MirTerminator::Return(Some(val));
@@ -831,7 +863,7 @@ fn build_remaining(
             crate::sema::CheckedStmt::Return(value) => {
                 let mir_val = match value {
                     Some(e) => {
-                        let (val, _) = build_expr(e, &mut stmts, temp_counter, structs);
+                        let (val, _) = build_expr(e, &mut stmts, temp_counter, structs, enums);
                         Some(val)
                     }
                     None => None,
@@ -840,7 +872,7 @@ fn build_remaining(
                 break;
             }
             crate::sema::CheckedStmt::If { cond, then_block, else_block } => {
-                let (cond_val, _) = build_expr(cond, &mut stmts, temp_counter, structs);
+                let (cond_val, _) = build_expr(cond, &mut stmts, temp_counter, structs, enums);
                 let then_id = *block_id + 1;
                 let has_else = else_block.is_some();
                 let else_id = if has_else { *block_id + 2 } else { 0 };
@@ -854,20 +886,21 @@ fn build_remaining(
                 };
 
                 // For nested if in remaining, we just build the then block and create a merge
-                build_block(then_block, &mut Vec::new(), then_id, block_id, temp_counter, ret_type.clone(), structs, loop_stack);
+                build_block(then_block, &mut Vec::new(), then_id, block_id, temp_counter, ret_type.clone(), structs, enums,
+                    loop_stack);
                 // This is simplified — nested control flow in remaining is not fully handled
                 break;
             }
             crate::sema::CheckedStmt::Block(inner) => {
                 for s in &inner.stmts {
                     if let crate::sema::CheckedStmt::Let { name, ty: _, value, mutable: _ } = s {
-                        let (val, _) = build_expr(value, &mut stmts, temp_counter, structs);
+                        let (val, _) = build_expr(value, &mut stmts, temp_counter, structs, enums);
                         stmts.push(MirStmt::Assign { dest: name.clone(), value: val });
                     } else if let crate::sema::CheckedStmt::Expr(expr, _) = s {
-                        let _ = build_expr(expr, &mut stmts, temp_counter, structs);
+                        let _ = build_expr(expr, &mut stmts, temp_counter, structs, enums);
                     } else if let crate::sema::CheckedStmt::Return(value) = s {
                         let mir_val = match value {
-                            Some(e) => { let (v, _) = build_expr(e, &mut stmts, temp_counter, structs); Some(v) }
+                            Some(e) => { let (v, _) = build_expr(e, &mut stmts, temp_counter, structs, enums); Some(v) }
                             None => None,
                         };
                         terminator = MirTerminator::Return(mir_val);
@@ -887,9 +920,41 @@ fn build_remaining(
     }
 }
 
+/// Emit a cast when an integer value's width does not match the expected type.
+/// Enum discriminants are i64 while a function may declare i32, so returns need
+/// an explicit narrow/widen instead of emitting type-mismatched IR.
+fn coerce_int_width(
+    val: MirValue,
+    from: &MirType,
+    to: &MirType,
+    stmts: &mut Vec<MirStmt>,
+    temp_counter: &mut usize,
+) -> MirValue {
+    let int_width = |t: &MirType| match t {
+        MirType::I8 | MirType::U8 => Some(8),
+        MirType::I16 | MirType::U16 => Some(16),
+        MirType::I32 | MirType::U32 => Some(32),
+        MirType::I64 | MirType::U64 | MirType::Enum(_) => Some(64),
+        _ => None,
+    };
+    match (int_width(from), int_width(to)) {
+        (Some(a), Some(b)) if a != b => {
+            let dest = format!("_coerce{}", temp_counter);
+            *temp_counter += 1;
+            stmts.push(MirStmt::Cast {
+                dest: dest.clone(),
+                value: val,
+                target_ty: to.clone(),
+            });
+            MirValue::Var(dest)
+        }
+        _ => val,
+    }
+}
+
 // ─── Expression Builder ───────────────────────────────────
 
-fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_counter: &mut usize, structs: &[crate::sema::CheckedStruct]) -> (MirValue, MirType) {
+fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_counter: &mut usize, structs: &[crate::sema::CheckedStruct], enums: &[crate::sema::CheckedEnum]) -> (MirValue, MirType) {
     match expr {
         crate::sema::CheckedExpr::IntLit(n, ty) => {
             let mir_ty = sema_ty_to_mir(ty);
@@ -921,8 +986,8 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(name.clone()), sema_ty_to_mir(ty))
         }
         crate::sema::CheckedExpr::Binary { op, left, right, result_ty } => {
-            let (l_val, _) = build_expr(left, stmts, temp_counter, structs);
-            let (r_val, _) = build_expr(right, stmts, temp_counter, structs);
+            let (l_val, _) = build_expr(left, stmts, temp_counter, structs, enums);
+            let (r_val, _) = build_expr(right, stmts, temp_counter, structs, enums);
 
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
@@ -953,7 +1018,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::Unary { op, operand, result_ty } => {
-            let (val, _) = build_expr(operand, stmts, temp_counter, structs);
+            let (val, _) = build_expr(operand, stmts, temp_counter, structs, enums);
 
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
@@ -972,7 +1037,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::Assign { target, value } => {
-            let (val, _) = build_expr(value, stmts, temp_counter, structs);
+            let (val, _) = build_expr(value, stmts, temp_counter, structs, enums);
             let dest = match target.as_ref() {
                 crate::sema::CheckedExpr::Var(name, _) => name.clone(),
                 _ => {
@@ -988,7 +1053,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), MirType::Void)
         }
         crate::sema::CheckedExpr::RefExpr { mutable: _, operand, result_ty } => {
-            let (val, _) = build_expr(operand, stmts, temp_counter, structs);
+            let (val, _) = build_expr(operand, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
             stmts.push(MirStmt::Assign {
@@ -998,7 +1063,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::Deref { operand, result_ty } => {
-            let (val, _) = build_expr(operand, stmts, temp_counter, structs);
+            let (val, _) = build_expr(operand, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
             stmts.push(MirStmt::Assign {
@@ -1028,7 +1093,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
 
             let mut mir_args = Vec::new();
             for arg in args {
-                let (val, _) = build_expr(arg, stmts, temp_counter, structs);
+                let (val, _) = build_expr(arg, stmts, temp_counter, structs, enums);
                 mir_args.push(val);
             }
 
@@ -1069,10 +1134,10 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             ret_ty
         }
         crate::sema::CheckedExpr::MethodCall { receiver, method: _, mangled, args, result_ty } => {
-            let (recv_val, _) = build_expr(receiver, stmts, temp_counter, structs);
+            let (recv_val, _) = build_expr(receiver, stmts, temp_counter, structs, enums);
             let mut mir_args = vec![recv_val];
             for arg in args {
-                let (val, _) = build_expr(arg, stmts, temp_counter, structs);
+                let (val, _) = build_expr(arg, stmts, temp_counter, structs, enums);
                 mir_args.push(val);
             }
 
@@ -1088,7 +1153,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::FieldAccess { receiver, field, result_ty } => {
-            let (recv_val, recv_ty) = build_expr(receiver, stmts, temp_counter, structs);
+            let (recv_val, recv_ty) = build_expr(receiver, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
 
@@ -1132,7 +1197,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             let func_name = format!("{}_{}", type_name, method);
             let mut mir_args = Vec::new();
             for arg in args {
-                let (val, _) = build_expr(arg, stmts, temp_counter, structs);
+                let (val, _) = build_expr(arg, stmts, temp_counter, structs, enums);
                 mir_args.push(val);
             }
 
@@ -1148,13 +1213,23 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::PathAccess { type_name, name, result_ty } => {
-            // For now, treat as a variable access
+            // A unit enum variant lowers to its discriminant, matching how
+            // MirPattern::EnumVariant compares tags at match sites.
+            if let crate::sema::Ty::Enum(_) = result_ty {
+                let tag = enums
+                    .iter()
+                    .find(|e| e.name == *type_name)
+                    .and_then(|e| e.variants.iter().position(|v| v.name == *name))
+                    .unwrap_or(0) as i64;
+                return (MirValue::Int(tag, MirType::I64), MirType::I64);
+            }
+            // Associated const or unresolved path: treat as a variable access.
             let var_name = format!("{}_{}", type_name, name);
             (MirValue::Var(var_name), sema_ty_to_mir(result_ty))
         }
         crate::sema::CheckedExpr::Index { target, index, result_ty } => {
-            let (target_val, _) = build_expr(target, stmts, temp_counter, structs);
-            let (index_val, _) = build_expr(index, stmts, temp_counter, structs);
+            let (target_val, _) = build_expr(target, stmts, temp_counter, structs, enums);
+            let (index_val, _) = build_expr(index, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
             let target_str = match &target_val {
@@ -1181,7 +1256,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Int(0, MirType::Void), MirType::Void)
         }
         crate::sema::CheckedExpr::Cast { expr: inner, target_ty } => {
-            let (val, _) = build_expr(inner, stmts, temp_counter, structs);
+            let (val, _) = build_expr(inner, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
             stmts.push(MirStmt::Cast {
@@ -1192,7 +1267,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             (MirValue::Var(dest), sema_ty_to_mir(target_ty))
         }
         crate::sema::CheckedExpr::Match { scrutinee, arms, result_ty } => {
-            let (scrut_val, _) = build_expr(scrutinee, stmts, temp_counter, structs);
+            let (scrut_val, _) = build_expr(scrutinee, stmts, temp_counter, structs, enums);
             let dest = format!("_t{}", temp_counter);
             *temp_counter += 1;
 
@@ -1200,7 +1275,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
             for arm in arms {
                 let mut arm_stmts = Vec::new();
                 let mut arm_temp = *temp_counter;
-                let (body_val, _) = build_expr(&arm.body, &mut arm_stmts, &mut arm_temp, structs);
+                let (body_val, _) = build_expr(&arm.body, &mut arm_stmts, &mut arm_temp, structs, enums);
                 *temp_counter = arm_temp;
 
                 let mir_pattern = match &arm.pattern {
@@ -1218,7 +1293,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
 
                 let mir_guard = match &arm.guard {
                     Some(g) => {
-                        let (gv, _) = build_expr(g, &mut arm_stmts, &mut arm_temp, structs);
+                        let (gv, _) = build_expr(g, &mut arm_stmts, &mut arm_temp, structs, enums);
                         *temp_counter = arm_temp;
                         Some(gv)
                     }
@@ -1250,7 +1325,7 @@ fn build_expr(expr: &crate::sema::CheckedExpr, stmts: &mut Vec<MirStmt>, temp_co
                 .map(|s| s.fields.iter().map(|f| sema_ty_to_mir(&f.1)).collect())
                 .unwrap_or_default();
             for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
-                let (val, _ty) = build_expr(field_expr, stmts, temp_counter, structs);
+                let (val, _ty) = build_expr(field_expr, stmts, temp_counter, structs, enums);
                 let field_ty = field_tys.get(i).cloned().unwrap_or(MirType::Void);
                 stmts.push(MirStmt::StoreField {
                     struct_var: dest.clone(),
