@@ -400,7 +400,7 @@ impl Env {
         self.consts.get(name).cloned()
     }
 
-    fn resolve_type(&self, ty: &Type) -> Result<Ty> {
+    fn resolve_type(&mut self, ty: &Type) -> Result<Ty> {
         match ty {
             Type::Named(s) => {
                 if s == "Self" {
@@ -448,6 +448,41 @@ impl Env {
                 let resolved_args: Vec<Ty> = args.iter()
                     .map(|a| self.resolve_type(a))
                     .collect::<Result<Vec<_>>>()?;
+                // A generic struct written out with concrete arguments
+                // (`Box<i32>`) names the specialized layout the struct literal
+                // registers, so both sides agree on one concrete type.
+                if let Some(info) = self.structs.get(name).cloned() {
+                    if info.type_params.len() == resolved_args.len() {
+                        let suffix: String = resolved_args
+                            .iter()
+                            .map(|t| t.to_string())
+                            .collect::<Vec<_>>()
+                            .join("_");
+                        let mono = format!("{}__{}", name, suffix);
+                        if !self.structs.contains_key(&mono) {
+                            let subst: HashMap<String, Ty> = info
+                                .type_params
+                                .iter()
+                                .cloned()
+                                .zip(resolved_args.iter().cloned())
+                                .collect();
+                            let fields = info
+                                .fields
+                                .iter()
+                                .map(|(n, t)| (n.clone(), self.resolve_type_with_subst(t, &subst)))
+                                .collect();
+                            self.structs.insert(
+                                mono.clone(),
+                                StructInfo {
+                                    name: mono.clone(),
+                                    type_params: Vec::new(),
+                                    fields,
+                                },
+                            );
+                        }
+                        return Ok(Ty::Struct(mono));
+                    }
+                }
                 Ok(Ty::Generic(name.clone(), resolved_args))
             }
         }
@@ -1221,6 +1256,22 @@ pub fn check(program: &Program) -> CheckResult {
         return Err(deferred_errors);
     }
 
+    // Emit specialized struct layouts created while checking generic struct
+    // literals (Box__i32 and friends), so codegen can resolve their types.
+    let declared: std::collections::HashSet<String> =
+        structs.iter().map(|s: &CheckedStruct| s.name.clone()).collect();
+    let mut specialized: Vec<CheckedStruct> = env
+        .structs
+        .values()
+        .filter(|info| !declared.contains(&info.name) && info.name.contains("__"))
+        .map(|info| CheckedStruct {
+            name: info.name.clone(),
+            fields: info.fields.clone(),
+        })
+        .collect();
+    specialized.sort_by(|a, b| a.name.cmp(&b.name));
+    structs.extend(specialized);
+
     Ok(CheckedProgram {
         functions,
         structs,
@@ -1780,10 +1831,47 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                     pos: pos.clone(),
                 }
             })?;
+
+            // Generic structs: infer type arguments from the field values, then
+            // check against the substituted field types. The literal's type
+            // becomes the specialized name (Box__i32) so field access and MIR
+            // struct lookup work on a concrete layout.
+            let mut subst: HashMap<String, Ty> = HashMap::new();
+            if !struct_info.type_params.is_empty() {
+                for (field_name, field_expr) in fields {
+                    let Some((_, declared)) = struct_info
+                        .fields
+                        .iter()
+                        .find(|(n, _)| n == field_name)
+                    else {
+                        continue;
+                    };
+                    let checked = check_expr(env, field_expr)?;
+                    // Untyped int literals default to i32; let a concrete field
+                    // pin the parameter instead of the literal's default.
+                    if matches!(checked, CheckedExpr::IntLit(_, _))
+                        && matches!(declared, Ty::GenericParam(_))
+                    {
+                        continue;
+                    }
+                    let val_ty = get_expr_type(&checked)?;
+                    infer_types(declared, &val_ty, &mut subst)?;
+                }
+                for tp in &struct_info.type_params {
+                    subst.entry(tp.clone()).or_insert(Ty::I32);
+                }
+            }
+
+            let concrete_fields: Vec<(String, Ty)> = struct_info
+                .fields
+                .iter()
+                .map(|(n, ty)| (n.clone(), env.resolve_type_with_subst(ty, &subst)))
+                .collect();
+
             let mut checked_fields = Vec::new();
             for (field_name, field_expr) in fields {
                 let checked = check_expr(env, field_expr)?;
-                let field_def = struct_info.fields.iter().find(|(n, _)| n == field_name);
+                let field_def = concrete_fields.iter().find(|(n, _)| n == field_name);
                 match field_def {
                     Some((_, expected_ty)) => {
                         let val_ty = get_expr_type(&checked)?;
@@ -1810,9 +1898,36 @@ fn check_expr(env: &mut Env, expr: &Expr) -> Result<CheckedExpr> {
                     }
                 }
             }
-            let result_ty = Ty::Struct(name.clone());
+
+            // Register the specialized layout so later field accesses resolve.
+            let concrete_name = if struct_info.type_params.is_empty() {
+                name.clone()
+            } else {
+                let suffix: String = struct_info
+                    .type_params
+                    .iter()
+                    .map(|tp| {
+                        subst
+                            .get(tp)
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "i32".to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let mono = format!("{}__{}", name, suffix);
+                if env.lookup_struct(&mono).is_none() {
+                    env.add_struct(StructInfo {
+                        name: mono.clone(),
+                        type_params: Vec::new(),
+                        fields: concrete_fields.clone(),
+                    })?;
+                }
+                mono
+            };
+
+            let result_ty = Ty::Struct(concrete_name.clone());
             Ok(CheckedExpr::StructLit {
-                name: name.clone(),
+                name: concrete_name,
                 fields: checked_fields,
                 result_ty,
                 pos: pos.clone(),

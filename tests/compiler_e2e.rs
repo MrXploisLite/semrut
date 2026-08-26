@@ -286,3 +286,58 @@ pub fn main() -> i32 {
         err
     );
 }
+
+#[test]
+fn generic_struct_single_param() {
+    let src = r#"
+struct Box<T> {
+    value: T,
+}
+
+pub fn main() -> i32 {
+    let b = Box { value: 42 };
+    return b.value;
+}
+"#;
+    let bin = compile_ok("generic_struct", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
+
+#[test]
+fn generic_struct_two_params() {
+    let src = r#"
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+pub fn main() -> i32 {
+    let p = Pair { first: 40, second: 2 };
+    return p.first + p.second;
+}
+"#;
+    let bin = compile_ok("generic_pair", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
+
+#[test]
+fn generic_struct_in_fn_signature() {
+    // `Box<i32>` written out in a signature must name the same specialized
+    // layout the struct literal creates.
+    let src = r#"
+struct Box<T> {
+    value: T,
+}
+
+fn unwrap(b: Box<i32>) -> i32 {
+    return b.value;
+}
+
+pub fn main() -> i32 {
+    let b = Box { value: 42 };
+    return unwrap(b);
+}
+"#;
+    let bin = compile_ok("generic_sig", src);
+    assert_eq!(run_exit_code(&bin), 42);
+}
